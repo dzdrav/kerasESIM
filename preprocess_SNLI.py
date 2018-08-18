@@ -32,3 +32,30 @@ def load_data(path):
     print("Loaded {}/{}/{} Skipped {}".format(len(prems_arr), len(hypos_arr), len(label_arr), len(skipped_examples)))
 
     return (prems_arr, hypos_arr, label_arr)
+
+if  __name__ == '__main__':
+    """
+    preprocess SNLI
+    """
+    dataset = 'train' # SNLI train
+    in_filepath = 'snli_1.0/snli_1.0_{}.jsonl'.format(dataset)
+    prems_arr, hypos_arr, label_arr = load_data(in_filepath)
+
+    out_filepath = '{}.json'.format(dataset)
+    open(out_filepath, 'w').write(json.dumps([prems_arr, hypos_arr, label_arr]))
+
+
+    dataset = 'dev'
+    in_filepath = 'snli_1.0/snli_1.0_{}.jsonl'.format(dataset)
+    prems_arr, hypos_arr, label_arr = load_data(in_filepath)
+
+    out_filepath = 'validation.json'
+    open(out_filepath, 'w').write(json.dumps([prems_arr, hypos_arr, label_arr]))
+
+
+    dataset = 'test'
+    in_filepath = 'snli_1.0/snli_1.0_{}.jsonl'.format(dataset)
+    prems_arr, hypos_arr, label_arr = load_data(in_filepath)
+
+    out_filepath = '{}.json'.format(dataset)
+    open(out_filepath, 'w').write(json.dumps([prems_arr, hypos_arr, label_arr]))

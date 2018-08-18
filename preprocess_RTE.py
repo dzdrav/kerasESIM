@@ -61,3 +61,12 @@ def XML_to_TXT(filenameIn, filenameOutTrain, filenameOutTest, mini = False):
                 outTrain.write("%s\n" % row)
             else:
                 outTest.write("%s\n" % row)
+
+if  __name__ == '__main__':
+    """
+    preprocess RTE
+    """
+	input = "dataset.xml"
+	output_train = "RTE/RTE_train.txt"
+	output_test = "RTE/RTE_test.txt"
+	XML_to_TXT(input, output_train, output_test, mini = False)

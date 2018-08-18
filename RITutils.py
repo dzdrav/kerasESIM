@@ -122,3 +122,13 @@ def merge_data_with_snli():
         rtrn[2].append(label)
 
     open('RTE_train.json', 'w').write(json.dumps(rtrn))
+
+
+if  __name__ == '__main__':
+    """
+    preprocess RTE (2nd part)
+    """
+    save_train_data('RTE/RTE_train.txt')
+    save_test_data('RTE/RTE_test.txt')
+    #merge_data_with_snli()
+    pass
