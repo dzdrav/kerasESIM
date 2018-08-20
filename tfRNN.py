@@ -46,11 +46,11 @@ class AttentionAlignmentModel:
     self.Layers = 1
     self.EmbeddingSize = 300
     self.BatchSize = 512
-    #self.BatchSize = 128
     self.Patience = 8
     self.MaxEpoch = 42
     self.SentMaxLen = 42
-    self.DropProb = 0.4
+    # self.DropProb = 0.4 # originalna vrijednost
+    self.DropProb = 0.5 # navedeno u radu Chen et.al.
     self.L2Strength = 1e-5
     self.Activate = 'relu'
     self.Optimizer = 'rmsprop'

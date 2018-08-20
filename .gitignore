@@ -1,6 +1,16 @@
 #dataset and support files
 snli_1.0/
+RTE/
 glove.840B.300d.txt
+dataset.xml
+*.json
+output_*.txt
+
+#rest of generated files
+EAM*.*
+GloVe_snli.npy
+unregisterd_word.txt
+
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
