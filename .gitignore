@@ -5,11 +5,13 @@ glove.840B.300d.txt
 dataset.xml
 *.json
 output_*.txt
+esim_*.txt
 
 #rest of generated files
 EAM*.*
 GloVe_snli.npy
 unregisterd_word.txt
+pred_vld.txt
 
 
 # Byte-compiled / optimized / DLL files
