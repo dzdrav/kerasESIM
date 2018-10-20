@@ -11,8 +11,8 @@ if __name__ == '__main__':
     #md.create_standard_attention_model()
     md.create_enhanced_attention_model()
     md.compile_model()
-    # md.label_test_file()
     md.start_train()
+    md.label_test_file()
     # md.evaluate_on_test() # nepotrebno jer se ova metoda poziva u md.start_train()
     # evaluiranje nad RTE datasetom modela učenog nad SNLI
     #md.evaluate_rte_by_snli_model(threshold=0.4)

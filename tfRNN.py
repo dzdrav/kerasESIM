@@ -54,17 +54,25 @@ class AttentionAlignmentModel:
     self.Patience = 7 # u izvornom kodu Chen et.al.
     # self.Patience = 6 # vlastiti izbor
     self.MaxEpoch = 42
-    # self.SentMaxLen = 42 # originalna vrijednost
-    self.SentMaxLen = 100 # uočeno u izvornom kodu Chen et.al.
+    self.SentMaxLen = 42 # originalna vrijednost
+    # self.SentMaxLen = 100 # uočeno u izvornom kodu Chen et.al.
     # self.DropProb = 0.4 # originalna vrijednost
     self.DropProb = 0.5 # navedeno u radu Chen et.al.
     # self.L2Strength = 1e-5 # originalna linija
     self.L2Strength = 0.0 # uočeno u paper kodu
     self.Activate = 'relu'
     # self.Optimizer = 'rmsprop' # originalna vrijednost
-    self.Optimizer = keras.optimizers.Adam(lr=0.0004) # u radu naveden Adam, orig. rmsprop
+    self.Optimizer = keras.optimizers.Adam(lr = 0.0004, clipnorm = 10.) # u radu naveden Adam, orig. rmsprop
     self.rnn_type = annotation
     self.dataset = dataset
+    
+    # modifikacije treniranja modela
+    self.LowercaseTokens = True # pretvaramo li tokene u lowercase prije obrade
+        # promjena owercaseTokens zahtijeva postavljanje RetrainEmbeddings na True 
+    self.RetrainEmbeddings = False # True: ponovno treniramo word embeddinge prije treninga modela
+    self.LoadExistingWeights = False # True: učitavamo postojeće weighte za model
+    self.TrainableEmbeddings = True # True: model ažurira word embeddinge tijekom treninga
+    self.LastDropoutHalf = False # True: zadnji dropout layer ima 1/2 faktor dropouta
 
     # 2, Define Class Variables
     self.Vocab = 0
@@ -99,9 +107,15 @@ class AttentionAlignmentModel:
     self.train,self.validation,self.test = self.load_data()
 
     # 2, Prep Word Indexer: assign each word a number
-    self.indexer = Tokenizer(lower=False, filters='') # TODO staviti ovdje TRUE
+        # lower određuje pretvaramo li riječi u lowercase prije tokeniziranja
+    # self.indexer = Tokenizer(lower=False, filters='') # originalna linija
+    self.indexer = Tokenizer(lower = self.LowercaseTokens, filters = '') # nova linija
+                            # filters = '#&*+-/;<=>@[\]^_`{|}~', # nova linija
+                            # num_words = 42394) # nova linija
+    
     # indexer fitamo nad training podacima
     self.indexer.fit_on_texts(self.train[0] + self.train[1]) # todo remove test
+    # self.Vocab je veličina vokabulara
     self.Vocab = len(self.indexer.word_counts) + 1
 
     # 3, Convert each word in sent to num and zero pad
@@ -116,15 +130,16 @@ class AttentionAlignmentModel:
 
   def load_GloVe(self):
     # Creat a embedding matrix for word2vec(use GloVe)
+    # embed matrica sadrži embeddinge za riječi
     embed_index = {}
     for line in open('glove.840B.300d.txt','r'):
         value = line.split(' ') # Warning: Can't use split()! I don't know why...
         word = value[0]
         embed_index[word] = np.asarray(value[1:],dtype='float32')
-    # embed matrica se inicjializira na nule! trebala bi na normalnu nasumičnu distribuciju
+        # ovdje se embed matrica inicjializira na nule (originalno)
     embed_matrix = np.zeros((self.Vocab,self.EmbeddingSize)) # originalna linija
-    # trebala bi se inicijalizirati na normalnu nasumičnu distribuciju
-    # embed_matrix = np.random.normal((self.Vocab,self.EmbeddingSize)) # nova linija
+        # trebala bi se inicijalizirati na normalnu nasumičnu distribuciju
+    # embed_matrix = np.random.randn(self.Vocab,self.EmbeddingSize) # nova linija
     
     unregistered = []
     for word,i in self.indexer.word_index.items():
@@ -145,14 +160,14 @@ class AttentionAlignmentModel:
   @time_count
   def prep_embd(self):
     # Add a Embed Layer to convert word index to vector
-    if not os.path.exists('GloVe_' + self.dataset + '.npy'):
+    if not os.path.exists('GloVe_' + self.dataset + '.npy') or self.RetrainEmbeddings:
         self.load_GloVe()
     embed_matrix = np.load('GloVe_' + self.dataset + '.npy')
     self.Embed = Embedding(input_dim = self.Vocab,
                            output_dim = self.EmbeddingSize,
                            input_length = self.SentMaxLen,
                            # originalna linija: False, određuje trenirabilnost word embeddinga
-                           trainable = True,
+                           trainable = self.TrainableEmbeddings,
                            weights = [embed_matrix],
                            name = 'embed_snli')
 
@@ -245,10 +260,10 @@ class AttentionAlignmentModel:
     # Encoder = Bidirectional(LSTM(units=300, return_sequences=True, kernel_initializer='RandomNormal')) # (nova linija)
     Encoder = Bidirectional(CuDNNLSTM(units=300, return_sequences=True, kernel_initializer='RandomNormal')) # nova linija - CuDNNLSTM
 
-    # originalno, dropout je išao NAKON BiLSTM enkodanja
+        # originalno, dropout je išao NAKON BiLSTM enkodanja
     # embed_p = Dropout(self.DropProb)(Encoder(embed_p)) # originalna linija
     # embed_h = Dropout(self.DropProb)(Encoder(embed_h)) # originalna linija
-    # u paper kodu dropout ide PRIJE BiLSTM encodanja: sljedeće 4 linije
+        # u paper kodu dropout ide PRIJE BiLSTM encodanja: sljedeće 4 linije
     embed_p = Dropout(self.DropProb)(embed_p) # najprije dropout (nova linija)
     embed_h = Dropout(self.DropProb)(embed_h) # najprije dropout (nova linija)
     embed_p = Encoder(embed_p) # potom BiLSTM enkodiranje (nova linija)
@@ -274,10 +289,9 @@ class AttentionAlignmentModel:
     # konkatenacija [a_, a~, a_ * a~, a_ - a~], isto za b_, b~
     PremAlign = keras.layers.Concatenate()([embed_p, PremAlign, sb_1, mm_1,])  # [batch_size, Psize, 2*unit]
     HypoAlign = keras.layers.Concatenate()([embed_h, HypoAlign, sb_2, mm_2])  # [batch_size, Hsize, 2*unit]
-        # originalno dropout ide PRIJE ff layera direktno na konkatenaciju [a_, a~, a_ * a~, a_ - a~] 
+        # u paperu nema ovog dropouta pa je zakomentiran
     # PremAlign = Dropout(self.DropProb)(PremAlign) # originalna linija
     # HypoAlign = Dropout(self.DropProb)(HypoAlign) # originalna linija
-        # u paperu nema ovog dropouta pa je zakomentiran
     # ff layer sa RELU aktivacijama
     Compresser = TimeDistributed(Dense(300,
                                        kernel_regularizer=l2(self.L2Strength),
@@ -293,10 +307,10 @@ class AttentionAlignmentModel:
     # Decoder = Bidirectional(LSTM(units=300, return_sequences=True, kernel_initializer='RandomNormal'),
     Decoder = Bidirectional(CuDNNLSTM(units=300, return_sequences=True, kernel_initializer='RandomNormal'), # nova linija: CuDNNLSTM
                             name='finaldecoder')  # [-1,2*units] # originalno: name='finaldecoer'
-    # originalne 2 linije: originalno dropout ide POSLIJE primjene dekodera nad PremAlign i HypoAlign
+        # originalne 2 linije: originalno dropout ide POSLIJE primjene dekodera nad PremAlign i HypoAlign
     # final_p = Dropout(self.DropProb)(Decoder(PremAlign)) # originalna linija
     # final_h = Dropout(self.DropProb)(Decoder(HypoAlign)) # originalna linija
-    # u paperu, dropout ide direktn na izlaz ff layera, dakle PRIJE dekodera, ovako (sljedeće 4 linije):
+        # u paperu, dropout ide direktn na izlaz ff layera, dakle PRIJE dekodera, ovako (sljedeće 4 linije):
     PremAlign = Dropout(self.DropProb)(PremAlign) # nova linija
     HypoAlign = Dropout(self.DropProb)(HypoAlign) # nova linija
     final_p = Decoder(PremAlign) # nova linija
@@ -319,10 +333,12 @@ class AttentionAlignmentModel:
                   name='dense300_' + self.dataset,
                   activation='tanh')(Final)
     # dropout layer
-        # originalno, dropout je s pola vjerojatnosti
+        # originalno, dropout je s pola vjerojatnosti, u paper kodu nema takve modifikacije
+    factor = 1
+    if self.LastDropoutHalf:
+        factor = 2
     # Final = Dropout(self.DropProb / 2)(Final) # originalna linija
-	    # u paper kodu nema takve modifikacije
-    Final = Dropout(self.DropProb)(Final) # (nova linija)
+    Final = Dropout(self.DropProb / factor)(Final) # (nova linija)
 
     # ff layer s linearnim aktivacijama i softmax klasifikatorom
     Final = Dense(3 if self.dataset == 'snli' else 2,
@@ -339,19 +355,20 @@ class AttentionAlignmentModel:
                        metrics=['accuracy' , precision, recall, f1_score]
                        if self.dataset == 'rte' else ['accuracy'])
     self.model.summary()
-    # originalni kod ne sadrži sljedeću liniju: plota strukturu modela
-    # plot_model(self.model, to_file='model_plot.png', show_shapes=True, show_layer_names=True)
     fn = self.rnn_type + '_' + self.dataset + '.check'
-    if os.path.exists(fn):
-      self.model.load_weights(fn, by_name=True)
-      print('--------Load Weights Successful!--------')
+    if os.path.exists(fn) and self.LoadExistingWeights: # nova linija: dodana provjera za self.LoadExistingWeights
+        self.model.load_weights(fn, by_name=True)
+        print('--------Load Weights Successful!--------')
+    # nove 2 linije: brišemo postojeće weighte ako ih ne koristimo
+    elif os.path.exists(fn):
+        os.remove(fn)
+        
 
   def start_train(self):
     """ Starts to Train the entire Model Based on set Parameters """
     # 1, Prep
     # callback = [EarlyStopping(patience=self.Patience), # originalno
-    # Verbosity mode. 0 = silent, 1 = progress bar, 2 = one line per epoch
-    callback = [EarlyStopping(patience=self.Patience, verbose=1), # verbose=1
+    callback = [EarlyStopping(patience=self.Patience, verbose=2),
                 ReduceLROnPlateau(patience=5, verbose=1),
                 CSVLogger(filename=self.rnn_type+'log.csv'),
                 ModelCheckpoint(self.rnn_type + '_' + self.dataset + '.check',
@@ -363,9 +380,9 @@ class AttentionAlignmentModel:
                    y = self.train[2],
                    batch_size = self.BatchSize,
                    epochs = self.MaxEpoch,
-                   validation_data=([self.test[0], self.test[1]], self.test[2]), # originalno
+                   # validation_data=([self.test[0], self.test[1]], self.test[2]), # originalno
                    # promijenjena linija jer se self.test već koristi u evaluate_on_test()
-                   # validation_data=([self.validation[0], self.validation[1]], self.validation[2]),
+                   validation_data=([self.validation[0], self.validation[1]], self.validation[2]),
                    callbacks = callback)
 
     # 3, Evaluate
