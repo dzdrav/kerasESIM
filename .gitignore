@@ -12,7 +12,8 @@ EAM*.*
 GloVe_snli.npy
 unregisterd_word.txt
 pred_vld.txt
-
+*.csv
+trials/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

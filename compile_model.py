@@ -2,7 +2,18 @@ import tfRNN
 
 
 if __name__ == '__main__':
-    md = tfRNN.AttentionAlignmentModel(annotation='EAM', dataset='snli')
+    options = {
+               'BatchSize': 128,
+               'L2Strength': 0.0,
+               'GradientClipping': 10.0,
+               'LearningRate': 4e-4,
+               'Optimizer': 'nadam',
+               'LastDropoutHalf': True,
+               'OOVWordInit': 'zeros'
+               }
+    md = tfRNN.AttentionAlignmentModel(options = options, 
+                                       annotation='EAM', 
+                                       dataset='snli')
     md.prep_data()
     md.prep_embd()
     # _test = False
@@ -12,9 +23,8 @@ if __name__ == '__main__':
     md.create_enhanced_attention_model()
     md.compile_model()
     md.start_train()
-    md.label_test_file()
-    # md.evaluate_on_test() # nepotrebno jer se ova metoda poziva u md.start_train()
-    # evaluiranje nad RTE datasetom modela učenog nad SNLI
-    #md.evaluate_rte_by_snli_model(threshold=0.4)
+    # md.label_test_file()
+    # tfRNN.format_report()
+    md.evaluate_on_set(set = 'test')
 
     #sess = tf.Session(config=tf.ConfigProto(log_device_placement=True))

@@ -24,12 +24,13 @@ from keras.preprocessing.text import Tokenizer
 from keras.regularizers import l2
 from keras.utils import np_utils
 from keras.layers.recurrent import GRU,LSTM
-from keras.layers import CuDNNGRU, CuDNNLSTM # CuDNN podržana implementacija LSTM i GRU-a
+from keras.layers import CuDNNGRU, CuDNNLSTM, Activation # CuDNN podržana implementacija LSTM i GRU-a
 from keras.backend.tensorflow_backend import set_session
 from keras.engine.topology import Layer
 from keras.utils.vis_utils import plot_model # vizualizacija modela
+from json_tricks import dump
 
-
+import sys
 
 
 def time_count(fn):
@@ -41,40 +42,58 @@ def time_count(fn):
     return returns
   return _wrapper
 
-
+  
 class AttentionAlignmentModel:
 
-  def __init__(self, annotation ='biGRU', dataset = 'snli'):
+# prima options dictionary koji inicijalizira hiperparametre
+  # def __init__(self, annotation ='biGRU', dataset = 'snli'):
+  def __init__(self, options, annotation ='biGRU', dataset = 'snli'):
     # 1, Set Basic Model Parameters
     self.Layers = 1
     self.EmbeddingSize = 300
-    self.BatchSize = 256
+    self.BatchSize = options['BatchSize'] if 'BatchSize' in options else 128
     # patience za early stopping
     # self.Patience = 8 # originalna vrijednost
     self.Patience = 7 # u izvornom kodu Chen et.al.
     # self.Patience = 6 # vlastiti izbor
-    self.MaxEpoch = 42
+    self.MaxEpoch = 25
     self.SentMaxLen = 42 # originalna vrijednost
     # self.SentMaxLen = 100 # uočeno u izvornom kodu Chen et.al.
     # self.DropProb = 0.4 # originalna vrijednost
     self.DropProb = 0.5 # navedeno u radu Chen et.al.
     # self.L2Strength = 1e-5 # originalna linija
-    self.L2Strength = 0.0 # uočeno u paper kodu
+    self.L2Strength = options['L2Strength'] if 'L2Strength' in options else 0.0
     self.Activate = 'relu'
+    self.GradientClipping = options['GradientClipping'] if 'GradientClipping' in options else 10.0
     # self.Optimizer = 'rmsprop' # originalna vrijednost
-    self.Optimizer = keras.optimizers.Adam(lr = 0.0004, clipnorm = 10.) # u radu naveden Adam, orig. rmsprop
+    self.LearningRate = options['LearningRate'] if 'LearningRate' in options else 4e-4
+    if 'Optimizer' not in options or options['Optimizer'] == 'nadam':
+        self.Optimizer = keras.optimizers.Nadam(lr = self.LearningRate, 
+            clipnorm = self.GradientClipping) 
+    elif options['Optimizer'] == 'adam': # u radu naveden Adam, orig. rmsprop
+        self.Optimizer = keras.optimizers.Adam(lr = self.LearningRate, 
+            clipnorm = self.GradientClipping) 
+    elif options['Optimizer'] == 'rmsprop':
+        self.Optimizer = keras.optimizers.RMSprop(lr = self.LearningRate, 
+            clipnorm = self.GradientClipping) 
     self.rnn_type = annotation
-    self.dataset = dataset
+    self.dataset = dataset    
     
     # modifikacije treniranja modela
-    self.LowercaseTokens = True # pretvaramo li tokene u lowercase prije obrade
-        # promjena owercaseTokens zahtijeva postavljanje RetrainEmbeddings na True 
+    # pretvaramo li tokene u lowercase prije obrade
+    self.LowercaseTokens = options['LowercaseTokens'] if 'LowercaseTokens' in options else True
+        # promjena LowercaseTokens zahtijeva postavljanje RetrainEmbeddings na True 
     self.RetrainEmbeddings = False # True: ponovno treniramo word embeddinge prije treninga modela
     self.LoadExistingWeights = False # True: učitavamo postojeće weighte za model
     self.TrainableEmbeddings = True # True: model ažurira word embeddinge tijekom treninga
-    self.LastDropoutHalf = False # True: zadnji dropout layer ima 1/2 faktor dropouta
+    # True: zadnji dropout layer ima 1/2 faktor dropouta
+    self.LastDropoutHalf = options['LastDropoutHalf'] if 'LastDropoutHalf' in options else False
+    self.OOVWordInit = options['OOVWordInit'] if 'OOVWordInit' in options else 'zeros'
 
     # 2, Define Class Variables
+    self.Options = options
+    self.History = None
+    # self.Verbose = 0
     self.Vocab = 0
     self.model = None
     self.GloVe = defaultdict(np.array)
@@ -82,6 +101,17 @@ class AttentionAlignmentModel:
     self.train, self.validation, self.test = [],[],[]
     self.Labels = {'contradiction': 0, 'neutral': 1, 'entailment': 2}
     self.rLabels = {0:'contradiction', 1:'neutral', 2:'entailment'}
+
+    # zapisuje report s hiperparametrima i statistikom učenja
+  def format_report(self):
+  # class WriteReportToFile(keras.callbacks.Callback):
+        # def on_train_end(self, logs={}):
+        # model = self.model
+      outFile = time.strftime('%Y%m%d%H%M', time.localtime()) + '_ESIM_report.json'
+      with open(outFile, 'w', encoding='utf-8') as outFile:
+          dump(self.Options, outFile, indent=2)
+          # json.dump(val_score, f, indent=2)
+          dump(self.History.history, outFile, indent=2)
 
   def load_data(self):
     if self.dataset == 'snli':
@@ -93,7 +123,7 @@ class AttentionAlignmentModel:
       vld = json.loads(open('RTE_valid.json', 'r').read())
       tst = json.loads(open('RTE_test.json', 'r').read())
     else:
-      raise ValueError('Unknwon Dataset')
+      raise ValueError('Unknown Dataset') # ispravljen typo, nova linija
 
     trn[2] = np_utils.to_categorical(trn[2], 3 if self.dataset == 'snli' else 2)
     vld[2] = np_utils.to_categorical(vld[2], 3 if self.dataset == 'snli' else 2)
@@ -137,9 +167,15 @@ class AttentionAlignmentModel:
         word = value[0]
         embed_index[word] = np.asarray(value[1:],dtype='float32')
         # ovdje se embed matrica inicjializira na nule (originalno)
-    embed_matrix = np.zeros((self.Vocab,self.EmbeddingSize)) # originalna linija
+    # embed_matrix = np.zeros((self.Vocab,self.EmbeddingSize)) # originalna linija
         # trebala bi se inicijalizirati na normalnu nasumičnu distribuciju
-    # embed_matrix = np.random.randn(self.Vocab,self.EmbeddingSize) # nova linija
+    # NOVI KOD -- POCETAK
+    if self.OOVWordInit == 'random':
+        embed_matrix = np.random.randn(self.Vocab,self.EmbeddingSize)
+    elif self.OOVWordInit == 'zeros':
+        embed_matrix = np.zeros((self.Vocab,self.EmbeddingSize))
+    # NOVI KOD -- KRAJ
+    
     
     unregistered = []
     for word,i in self.indexer.word_index.items():
@@ -332,6 +368,11 @@ class AttentionAlignmentModel:
                   bias_regularizer=l2(self.L2Strength),
                   name='dense300_' + self.dataset,
                   activation='tanh')(Final)
+                  
+    # ovaj layer ne postoji u originalnom kodu
+    # ff layer s linearnim aktivacijama  # nova linija
+    # Final = Activation(activation = 'linear')(Final) # nova linija
+    
     # dropout layer
         # originalno, dropout je s pola vjerojatnosti, u paper kodu nema takve modifikacije
     factor = 1
@@ -340,7 +381,7 @@ class AttentionAlignmentModel:
     # Final = Dropout(self.DropProb / 2)(Final) # originalna linija
     Final = Dropout(self.DropProb / factor)(Final) # (nova linija)
 
-    # ff layer s linearnim aktivacijama i softmax klasifikatorom
+    # softmax klasifikator
     Final = Dense(3 if self.dataset == 'snli' else 2,
                   activation='softmax',
                   name='judge300_' + self.dataset)(Final)
@@ -362,13 +403,14 @@ class AttentionAlignmentModel:
     # nove 2 linije: brišemo postojeće weighte ako ih ne koristimo
     elif os.path.exists(fn):
         os.remove(fn)
-        
-
+         
+  # returns history of train/val loss/acc values
   def start_train(self):
     """ Starts to Train the entire Model Based on set Parameters """
     # 1, Prep
     # callback = [EarlyStopping(patience=self.Patience), # originalno
     callback = [EarlyStopping(patience=self.Patience, verbose=2),
+                # WriteReportToFile(), # nova linija, cusotm callback za logganje
                 ReduceLROnPlateau(patience=5, verbose=1),
                 CSVLogger(filename=self.rnn_type+'log.csv'),
                 ModelCheckpoint(self.rnn_type + '_' + self.dataset + '.check',
@@ -376,7 +418,7 @@ class AttentionAlignmentModel:
                                 save_weights_only=True)]
 
     # 2, Train
-    self.model.fit(x = [self.train[0],self.train[1]],
+    self.History = self.model.fit(x = [self.train[0],self.train[1]],
                    y = self.train[2],
                    batch_size = self.BatchSize,
                    epochs = self.MaxEpoch,
@@ -384,44 +426,58 @@ class AttentionAlignmentModel:
                    # promijenjena linija jer se self.test već koristi u evaluate_on_test()
                    validation_data=([self.validation[0], self.validation[1]], self.validation[2]),
                    callbacks = callback)
-
+    self.format_report()
+    return self.History
     # 3, Evaluate
-    self.model.load_weights(self.rnn_type + '_' + self.dataset + '.check') # revert to the best model
-    self.evaluate_on_test()
+    # self.model.load_weights(self.rnn_type + '_' + self.dataset + '.check') # revert to the best model
+    # self.evaluate_on_test() # originalna linija
+    # self.evaluate_on_set(set = 'validation')
+    # self.evaluate_on_set(set = 'test')
 
-  def evaluate_on_test(self):
+  # def evaluate_on_test(self):
+  def evaluate_on_set(self, set = 'validation'):
+    self.model.load_weights(self.rnn_type + '_' + self.dataset + '.check') # revert to the best model
     if self.dataset == 'snli':
-      loss, acc = self.model.evaluate([self.test[0],self.test[1]],
-                                      self.test[2],batch_size=self.BatchSize)
-      print("Test: loss = {:.5f}, acc = {:.3f}%".format(loss, acc))
-    elif self.dataset == 'rte':
-      true_posi, real_true, pred_true = 0, 0, 0
-      count, left, stime = 0, len(self.test[0]), time.time()
-      for prem, hypo, truth in zip(self.test[0], self.test[1], self.test[2]):
+        if set == 'test':
+            dataset = self.test
+        elif set == 'validation':
+            dataset = self.validation
+        elif set == 'train':
+            dataset = self.train
+    loss, acc = self.model.evaluate([dataset[0], dataset[1]], 
+                                    dataset[2], batch_size=self.BatchSize)
+    # print("Test: loss = {:.5f}, acc = {:.3f}%".format(loss, acc)) # originalna linija
+    print(set.title() + ": loss = {:.5f}, acc = {:.4f}%".format(loss, acc))
+    return (loss, acc)
+    # TODO ovaj dalje dio funkcije (RTE) nije održavan, treba ga uskladiti sa SNLI dijelom
+    # elif self.dataset == 'rte':
+      # true_posi, real_true, pred_true = 0, 0, 0
+      # count, left, stime = 0, len(self.test[0]), time.time()
+      # for prem, hypo, truth in zip(self.test[0], self.test[1], self.test[2]):
       # for prem, hypo, truth in zip(self.train[0], self.train[1], self.train[2]):
-        prem = np.expand_dims(np.reshape(prem, -1), 0)
-        hypo = np.expand_dims(np.reshape(hypo, -1), 0)
-        predict = np.reshape(self.model.predict(x=[prem, hypo], batch_size=1), -1)
-        predict, truth = np.argmax(predict), np.argmax(truth)
-        if predict == truth and truth == 1:
-          true_posi += 1
-        if predict == 1:
-          pred_true += 1
-        if truth == 1:
-          real_true += 1
-        count += 1
-        if len(self.test[0]) - left >= 1024: break
-        if time.time() - stime > 1:
-          stime = time.time()
-          left -= count
-          print("{}/s | {}/{} | {:.0f} | p = {:.3f} | r = {:.3f}".format(count, len(self.test[0]) - left,
-                                                                     len(self.test[0]), left / count,
-                                                                     true_posi / pred_true,
-                                                                     true_posi / real_true))
-          count = 0
-      print("true_posi = {}, real_true = {}, pred_true = {}".format(true_posi, real_true, pred_true))
-      p, r = true_posi/pred_true, true_posi/real_true
-      print("prec = {:.4f}, recall = {:.4f}, 2pr/(p+r) = {:.4f}".format(p, r, 2*p*r/(p+r)))
+        # prem = np.expand_dims(np.reshape(prem, -1), 0)
+        # hypo = np.expand_dims(np.reshape(hypo, -1), 0)
+        # predict = np.reshape(self.model.predict(x=[prem, hypo], batch_size=1), -1)
+        # predict, truth = np.argmax(predict), np.argmax(truth)
+        # if predict == truth and truth == 1:
+          # true_posi += 1
+        # if predict == 1:
+          # pred_true += 1
+        # if truth == 1:
+          # real_true += 1
+        # count += 1
+        # if len(self.test[0]) - left >= 1024: break
+        # if time.time() - stime > 1:
+          # stime = time.time()
+          # left -= count
+          # print("{}/s | {}/{} | {:.0f} | p = {:.3f} | r = {:.3f}".format(count, len(self.test[0]) - left,
+                                                                     # len(self.test[0]), left / count,
+                                                                     # true_posi / pred_true,
+                                                                     # true_posi / real_true))
+          # count = 0
+      # print("true_posi = {}, real_true = {}, pred_true = {}".format(true_posi, real_true, pred_true))
+      # p, r = true_posi/pred_true, true_posi/real_true
+      # print("prec = {:.4f}, recall = {:.4f}, 2pr/(p+r) = {:.4f}".format(p, r, 2*p*r/(p+r)))
 
   def evaluate_rte_by_snli_model(self, threshold = 0.5):
     assert self.dataset == 'snli'
