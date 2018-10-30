@@ -18,7 +18,7 @@ from keras.layers.embeddings import Embedding
 from keras.layers.normalization import BatchNormalization
 from keras.layers.core import Lambda
 from keras.layers.wrappers import Bidirectional
-from keras.models import Model
+from keras.models import Model, load_model
 from keras.preprocessing.sequence import pad_sequences
 from keras.preprocessing.text import Tokenizer
 from keras.regularizers import l2
@@ -57,7 +57,7 @@ class AttentionAlignmentModel:
     self.Patience = 7 # u izvornom kodu Chen et.al.
     # self.Patience = 6 # vlastiti izbor
     self.MaxEpoch = 25
-    self.SentMaxLen = 42 # originalna vrijednost
+    self.SentMaxLen = 42 if dataset == 'snli' else 50 # originalna vrijednost
     # self.SentMaxLen = 100 # uočeno u izvornom kodu Chen et.al.
     # self.DropProb = 0.4 # originalna vrijednost
     self.DropProb = 0.5 # navedeno u radu Chen et.al.
@@ -99,6 +99,8 @@ class AttentionAlignmentModel:
     self.GloVe = defaultdict(np.array)
     self.indexer,self.Embed = None, None
     self.train, self.validation, self.test = [],[],[]
+    # služe za istovremeno treniranje SNLI+MNLI
+    self.mnli_train, self.snli_train = [], []
     self.Labels = {'contradiction': 0, 'neutral': 1, 'entailment': 2}
     self.rLabels = {0:'contradiction', 1:'neutral', 2:'entailment'}
 
@@ -107,7 +109,7 @@ class AttentionAlignmentModel:
   # class WriteReportToFile(keras.callbacks.Callback):
         # def on_train_end(self, logs={}):
         # model = self.model
-      outFile = time.strftime('%Y%m%d%H%M', time.localtime()) + '_ESIM_report.json'
+      outFile = time.strftime('%Y%m%d%H%M', time.localtime()) + '_ESIM_' + self.dataset.upper() + 'report.json'
       with open(outFile, 'w', encoding='utf-8') as outFile:
           dump(self.Options, outFile, indent=2)
           # json.dump(val_score, f, indent=2)
@@ -115,19 +117,28 @@ class AttentionAlignmentModel:
 
   def load_data(self):
     if self.dataset == 'snli':
-      trn = json.loads(open('train.json', 'r').read())
-      vld = json.loads(open('validation.json', 'r').read())
-      tst = json.loads(open('test.json', 'r').read())
+      trn = json.loads(open('snli_train.json', 'r').read())
+      vld = json.loads(open('snli_validation.json', 'r').read())
+      tst = json.loads(open('snli_test.json', 'r').read())
     elif self.dataset == 'rte':
       trn = json.loads(open('RTE_train.json', 'r').read())
       vld = json.loads(open('RTE_valid.json', 'r').read())
       tst = json.loads(open('RTE_test.json', 'r').read())
+    elif self.dataset == 'mnli': # validating with matched validation set
+      trn = json.loads(open('mnli_train.json', 'r').read())
+      vld = json.loads(open('mnli_validation_matched.json', 'r').read())
+      tst = json.loads(open('mnli_validation_mismatched.json', 'r').read())
+    # elif self.dataset == 'mnli_mismatched':
+      # trn = json.loads(open('mnli_train.json', 'r').read())
+      # tst = vld = json.loads(open('mnli_validation_mismatched.json', 'r').read())
+    # elif: self.dataset == 'snli+mnli':
     else:
       raise ValueError('Unknown Dataset') # ispravljen typo, nova linija
-
-    trn[2] = np_utils.to_categorical(trn[2], 3 if self.dataset == 'snli' else 2)
-    vld[2] = np_utils.to_categorical(vld[2], 3 if self.dataset == 'snli' else 2)
-    tst[2] = np_utils.to_categorical(tst[2], 3 if self.dataset == 'snli' else 2)
+    
+    # ako želimo RTE dataset, drugi argument: (3 if self.dataset == 'snli' else 2)
+    trn[2] = np_utils.to_categorical(trn[2], 3)
+    vld[2] = np_utils.to_categorical(vld[2], 3)
+    tst[2] = np_utils.to_categorical(tst[2], 3)        
 
     return trn, vld, tst
 
@@ -175,7 +186,6 @@ class AttentionAlignmentModel:
     elif self.OOVWordInit == 'zeros':
         embed_matrix = np.zeros((self.Vocab,self.EmbeddingSize))
     # NOVI KOD -- KRAJ
-    
     
     unregistered = []
     for word,i in self.indexer.word_index.items():
@@ -272,7 +282,7 @@ class AttentionAlignmentModel:
       final = BatchNormalization()(final)
 
     # 6, Prediction by softmax
-    final = Dense(3 if self.dataset == 'snli' else 2,
+    final = Dense(2 if self.dataset == 'rte' else 3,
                   activation='softmax')(final)
     if test_mode: self.model = Model(inputs=[premise,hypothesis],outputs=[Ep, Eh, final])
     else: self.model = Model(inputs=[premise, hypothesis], outputs=final)
@@ -382,7 +392,7 @@ class AttentionAlignmentModel:
     Final = Dropout(self.DropProb / factor)(Final) # (nova linija)
 
     # softmax klasifikator
-    Final = Dense(3 if self.dataset == 'snli' else 2,
+    Final = Dense(2 if self.dataset == 'rte' else 3,
                   activation='softmax',
                   name='judge300_' + self.dataset)(Final)
     self.model = Model(inputs=[premise, hypothesis], outputs=Final)
@@ -401,8 +411,8 @@ class AttentionAlignmentModel:
         self.model.load_weights(fn, by_name=True)
         print('--------Load Weights Successful!--------')
     # nove 2 linije: brišemo postojeće weighte ako ih ne koristimo
-    elif os.path.exists(fn):
-        os.remove(fn)
+    # elif os.path.exists(fn):
+        # os.remove(fn)
          
   # returns history of train/val loss/acc values
   def start_train(self):
@@ -410,11 +420,12 @@ class AttentionAlignmentModel:
     # 1, Prep
     # callback = [EarlyStopping(patience=self.Patience), # originalno
     callback = [EarlyStopping(patience=self.Patience, verbose=2),
-                # WriteReportToFile(), # nova linija, cusotm callback za logganje
+                # LambdaCallback(on_epoch_end)
                 ReduceLROnPlateau(patience=5, verbose=1),
                 CSVLogger(filename=self.rnn_type+'log.csv'),
-                ModelCheckpoint(self.rnn_type + '_' + self.dataset + '.check',
-                                save_best_only=True,
+                # ModelCheckpoint(filepath=self.rnn_type + '_' + self.dataset + '.check',
+                ModelCheckpoint(filepath=self.rnn_type + '_' + self.dataset + 'weights.{epoch:02d}-{val_loss:.2f}.check',
+                                save_best_only=False,
                                 save_weights_only=True)]
 
     # 2, Train
@@ -426,28 +437,58 @@ class AttentionAlignmentModel:
                    # promijenjena linija jer se self.test već koristi u evaluate_on_test()
                    validation_data=([self.validation[0], self.validation[1]], self.validation[2]),
                    callbacks = callback)
+    # self.model.save('ESIM.h5')
+    # self.model.load_weights(self.rnn_type + '_' + self.dataset + '.check') # revert to the best model
     self.format_report()
     return self.History
     # 3, Evaluate
-    # self.model.load_weights(self.rnn_type + '_' + self.dataset + '.check') # revert to the best model
+    
     # self.evaluate_on_test() # originalna linija
     # self.evaluate_on_set(set = 'validation')
     # self.evaluate_on_set(set = 'test')
 
   # def evaluate_on_test(self):
-  def evaluate_on_set(self, set = 'validation'):
-    self.model.load_weights(self.rnn_type + '_' + self.dataset + '.check') # revert to the best model
-    if self.dataset == 'snli':
-        if set == 'test':
-            dataset = self.test
-        elif set == 'validation':
+  #MNLI test = validation_{mis}matched
+  #SNLI test = test | validation | train
+  def evaluate_on_set(self, eval_set = 'snli_test', filename = None):
+    # provjerava valjanost eval_set argumenta
+    assert eval_set in ['snli_validation', 'snli_test', 
+                         'mnli_validation_matched',
+                         'mnli_validation_mismatched']
+    dataset = None
+    # učitava trenirane weighte modela (ako postoje)
+    if filename is not None:
+        self.model.load_weights(filename) # revert to the best model
+    elif os.path.exists(self.rnn_type + '_' + self.dataset + '.check'):
+        self.model.load_weights(self.rnn_type + '_' + self.dataset + '.check') # revert to the best model
+    else:
+        print('No weights found for model!')
+        print('Using random initialized weights...')
+    # pomoćne funkcije iz prep_data() TODO boilerplate code
+    def padding(x, MaxLen):
+        return pad_sequences(sequences=self.indexer.texts_to_sequences(x), maxlen=MaxLen)
+    def pad_data(x):
+        return padding(x[0], self.SentMaxLen), padding(x[1], self.SentMaxLen), x[2]
+    # provjerava nad vlastitim skupom (podržava SNLI i MNLI)
+    # ako testiramo nad istim datasetom, učitaj ga iz članskih varijabli
+    if (self.dataset == 'snli' and 'snli' in eval_set) or (self.dataset == 'mnli' and 'mnli' in eval_set):
+        if eval_set == 'snli_validation' or eval_set == 'mnli_validation_matched':
             dataset = self.validation
-        elif set == 'train':
-            dataset = self.train
+        elif eval_set == 'snli_test' or eval_set == 'mnli_validation_mismatched':
+            dataset = self.test
+    # ako testiramo unakrsno, učitaj odgovarajući dataset iz datoteke
+    else:
+        print('Loading ' + eval_set + ' data...')
+        dataset = json.loads(open(eval_set + '.json', 'r').read())
+        dataset[2] = np_utils.to_categorical(dataset[2], 3)
+        dataset = pad_data(dataset)
+    # evaluacija
     loss, acc = self.model.evaluate([dataset[0], dataset[1]], 
                                     dataset[2], batch_size=self.BatchSize)
+    
     # print("Test: loss = {:.5f}, acc = {:.3f}%".format(loss, acc)) # originalna linija
-    print(set.title() + ": loss = {:.5f}, acc = {:.4f}%".format(loss, acc))
+    print('Trained on: ' + self.dataset.upper())
+    print('Evaluated on: ' + eval_set.title() + ": loss = {:.5f}, acc = {:.4f}%".format(loss, acc))
     return (loss, acc)
     # TODO ovaj dalje dio funkcije (RTE) nije održavan, treba ga uskladiti sa SNLI dijelom
     # elif self.dataset == 'rte':

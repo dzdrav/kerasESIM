@@ -39,7 +39,7 @@ if  __name__ == '__main__':
     """
     preprocess SNLI
     """
-    dataset = 'train' # SNLI train
+    dataset = 'snli_train' # SNLI train
     in_filepath = 'snli_1.0/snli_1.0_{}.jsonl'.format(dataset)
     prems_arr, hypos_arr, label_arr = load_data(in_filepath)
 
@@ -47,15 +47,15 @@ if  __name__ == '__main__':
     open(out_filepath, 'w').write(json.dumps([prems_arr, hypos_arr, label_arr]))
 
 
-    dataset = 'dev'
+    dataset = 'snli_validation'
     in_filepath = 'snli_1.0/snli_1.0_{}.jsonl'.format(dataset)
     prems_arr, hypos_arr, label_arr = load_data(in_filepath)
 
-    out_filepath = 'validation.json'
+    out_filepath = '{}.json'.format(dataset)
     open(out_filepath, 'w').write(json.dumps([prems_arr, hypos_arr, label_arr]))
 
 
-    dataset = 'test'
+    dataset = 'snli_test'
     in_filepath = 'snli_1.0/snli_1.0_{}.jsonl'.format(dataset)
     prems_arr, hypos_arr, label_arr = load_data(in_filepath)
 
