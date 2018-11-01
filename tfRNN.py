@@ -2,6 +2,7 @@ import json
 import os
 import re
 import time
+import random
 import numpy as np
 import tensorflow as tf
 import pandas as pd
@@ -42,9 +43,15 @@ def time_count(fn):
     return returns
   return _wrapper
 
-  
-class AttentionAlignmentModel:
+class ResampleSnli(keras.callbacks.Callback):
+  def __init__(self, model):
+    self.ParentModel = model
+  def on_epoch_end(self, batch, logs):
+    self.ParentModel.merge_snli_into_mnli()
+  # def on_train_begin(self, logs):
+    # self.ParentModel.merge_snli_into_mnli()
 
+class AttentionAlignmentModel:
 # prima options dictionary koji inicijalizira hiperparametre
   # def __init__(self, annotation ='biGRU', dataset = 'snli'):
   def __init__(self, options, annotation ='biGRU', dataset = 'snli'):
@@ -57,7 +64,7 @@ class AttentionAlignmentModel:
     self.Patience = 7 # u izvornom kodu Chen et.al.
     # self.Patience = 6 # vlastiti izbor
     self.MaxEpoch = 25
-    self.SentMaxLen = 42 if dataset == 'snli' else 50 # originalna vrijednost
+    self.SentMaxLen = 42 if dataset == 'snli' else 50 # snli: 42, mnli: 50 default
     # self.SentMaxLen = 100 # uočeno u izvornom kodu Chen et.al.
     # self.DropProb = 0.4 # originalna vrijednost
     self.DropProb = 0.5 # navedeno u radu Chen et.al.
@@ -83,20 +90,24 @@ class AttentionAlignmentModel:
     # pretvaramo li tokene u lowercase prije obrade
     self.LowercaseTokens = options['LowercaseTokens'] if 'LowercaseTokens' in options else True
         # promjena LowercaseTokens zahtijeva postavljanje RetrainEmbeddings na True 
-    self.RetrainEmbeddings = False # True: ponovno treniramo word embeddinge prije treninga modela
+    # RetrainEmbeddings=True: ponovno treniramo word embeddinge prije treninga modela
+    self.RetrainEmbeddings = options['RetrainEmbeddings'] if 'RetrainEmbeddings' in options else False
     self.LoadExistingWeights = False # True: učitavamo postojeće weighte za model
     self.TrainableEmbeddings = True # True: model ažurira word embeddinge tijekom treninga
     # True: zadnji dropout layer ima 1/2 faktor dropouta
     self.LastDropoutHalf = options['LastDropoutHalf'] if 'LastDropoutHalf' in options else False
     self.OOVWordInit = options['OOVWordInit'] if 'OOVWordInit' in options else 'zeros'
 
-    # 2, Define Class Variables
+    # 2, Define Class Variable
     self.Options = options
+    self.Options['Timestamp'] = time.strftime('%Y%m%d%H%M', time.localtime())
+    self.Timestamp = self.Options['Timestamp']
     self.History = None
     # self.Verbose = 0
     self.Vocab = 0
     self.model = None
     self.GloVe = defaultdict(np.array)
+    self.glove_path = self.Timestamp + '_GloVe_' + self.dataset + '.npy'
     self.indexer,self.Embed = None, None
     self.train, self.validation, self.test = [],[],[]
     # služe za istovremeno treniranje SNLI+MNLI
@@ -104,17 +115,19 @@ class AttentionAlignmentModel:
     self.Labels = {'contradiction': 0, 'neutral': 1, 'entailment': 2}
     self.rLabels = {0:'contradiction', 1:'neutral', 2:'entailment'}
 
-    # zapisuje report s hiperparametrima i statistikom učenja
+  # zapisuje report s hiperparametrima i statistikom učenja
   def format_report(self):
-  # class WriteReportToFile(keras.callbacks.Callback):
-        # def on_train_end(self, logs={}):
-        # model = self.model
-      outFile = time.strftime('%Y%m%d%H%M', time.localtime()) + '_ESIM_' + self.dataset.upper() + 'report.json'
+      outFile = self.Timestamp + '_ESIM_' + self.dataset.upper() + '_report.json'
       with open(outFile, 'w', encoding='utf-8') as outFile:
           dump(self.Options, outFile, indent=2)
-          # json.dump(val_score, f, indent=2)
-          dump(self.History.history, outFile, indent=2)
 
+  def padd(self, x):
+    def padding(x, MaxLen):
+      return pad_sequences(sequences=self.indexer.texts_to_sequences(x), maxlen=MaxLen)
+    def pad_data(x):
+      return padding(x[0], self.SentMaxLen), padding(x[1], self.SentMaxLen), x[2]
+    return pad_data(x)
+  
   def load_data(self):
     if self.dataset == 'snli':
       trn = json.loads(open('snli_train.json', 'r').read())
@@ -128,47 +141,122 @@ class AttentionAlignmentModel:
       trn = json.loads(open('mnli_train.json', 'r').read())
       vld = json.loads(open('mnli_validation_matched.json', 'r').read())
       tst = json.loads(open('mnli_validation_mismatched.json', 'r').read())
-    # elif self.dataset == 'mnli_mismatched':
-      # trn = json.loads(open('mnli_train.json', 'r').read())
-      # tst = vld = json.loads(open('mnli_validation_mismatched.json', 'r').read())
-    # elif: self.dataset == 'snli+mnli':
+    elif self.dataset == 'mnlisnli':
+      trn = json.loads(open('mnli_train.json', 'r').read())
+      trn2 = json.loads(open('snli_train.json', 'r').read())
+      vld = json.loads(open('mnli_validation_matched.json', 'r').read())
+      vld2 = json.loads(open('snli_validation.json', 'r').read())
+      # sljedeću liniju NIKAKO ne brisati, o tome ovisi evaluate_on_set()
+      tst = json.loads(open('mnli_validation_mismatched.json', 'r').read())
+
+      """
+      ako želimo evaluirati model s postojećim weightima, treba učitati iste 
+      train i val primjere. Treba dati Timestamp u options['ConfigTimestamp']
+      json datoteke gdje se te konfiguracije nalaze.
+      Ako options['ConfigTimestamp'] ne postoji, biraju se random primjeri
+      i spremaju u json datoteku za kasnije korištenje
+      """
+      subset = [[],[],[]]
+      if 'ConfigTimestamp' in self.Options: # ako postoji timestamp u Options
+        indices = json.load(open(self.Options['ConfigTimestamp'] + '_validconfig.json', 'r'))
+      else: # inače generiraj nasumično
+        indices = random.sample(range(len(vld2[0])), 2000)
+        json.dump(indices, open(self.Timestamp + '_validconfig.json', 'w'))
+      # spajanje s MNLI val skupom
+      for index in indices:
+        for i in range(3):
+          subset[i].append(vld2[i][index])
+      for i in range(3):
+        vld[i].extend(subset[i])
+
+      subset = [[],[],[]]
+      if 'ConfigTimestamp' in self.Options: # ako postoji timestamp u Options
+        indices = json.load(open(self.Options['ConfigTimestamp'] + '_trainconfig.json', 'r'))
+      else: # inače generiraj nasumično
+        indices = random.sample(range(len(trn2[0])), int(0.15 * len(trn2[0]) ) )
+        json.dump(indices, open(self.Timestamp + '_trainconfig.json', 'w'))
+      # spajanje s MNLI train skupom
+      for index in indices:
+        for i in range(3):
+          subset[i].append(trn2[i][index])
+      for i in range(3):
+        trn[i].extend(subset[i])
     else:
       raise ValueError('Unknown Dataset') # ispravljen typo, nova linija
     
     # ako želimo RTE dataset, drugi argument: (3 if self.dataset == 'snli' else 2)
     trn[2] = np_utils.to_categorical(trn[2], 3)
     vld[2] = np_utils.to_categorical(vld[2], 3)
-    tst[2] = np_utils.to_categorical(tst[2], 3)        
-
+    tst[2] = np_utils.to_categorical(tst[2], 3)
+    
     return trn, vld, tst
+
+  # učitava oba dataseta iz datoteke u članske varijable (NE VRAĆA ništa)
+  def load_smnli_data(self):
+    snli = json.loads(open('snli_train.json', 'r').read())
+    mnli = json.loads(open('mnli_train.json', 'r').read())
+        
+    # snli[2] = np_utils.to_categorical(snli[2], 3)
+    # mnli[2] = np_utils.to_categorical(mnli[2], 3)
+    
+    self.snli_train, self.mnli_train = snli, mnli
+
+  # pretvara train skup u MNLI + 0.15*SNLI
+  def prep_snli_train_data(self):
+    # 0, praznimo trening skup
+    del self.train
+    self.train = [[],[],[]]
+    subset = [[],[],[]]
+
+    # 1, uzimamo random sample 15% indeksa SNLI-a
+    indices = random.sample(range(len(self.snli_train[0])), int(0.15 * len(self.snli_train[0]) ) )
+    # prolazimo kroz izabrane indekse i spremamo parove u novu listu
+    for index in indices:
+        for i in range(3):
+            subset[i].append(self.snli_train[i][index])
+    
+    # 2, spremamo nove rečenice u trening skup
+    for i in range(3):
+        self.train[i].extend(subset[i])
+        self.train[i].extend(self.mnli_train[i])
+      
+    # 3, treniramo indexer nad novim riječima
+    # self.indexer.fit_on_texts(subset[0] + subset[1])
+    del self.indexer
+    self.indexer = Tokenizer(lower = self.LowercaseTokens, filters = '') # nova linija
+    self.indexer.fit_on_texts(self.train[0] + self.train[1])
+    self.Vocab = len(self.indexer.word_counts) + 1
+    # želimo da se vel. vokabulara ne mijenja između epoha (pri retreniranju self.train)
+    # self.Vocab = 180000 #TODO privremeno rješenje bazirano na n=175528, 175644, smisliti bolje
+    
+    self.train[2] = np_utils.to_categorical(self.train[2], 3)
+    self.train = self.padd(self.train)
+
+  # priprema train set + indexer za novu epohu
+  # @time_count
+  # def merge_snli_into_mnli(self):
+    # self.prep_snli_train_data()
+    # self.prep_embd()
 
   @time_count
   def prep_data(self):
     # 1, Read raw Training,Validation and Test data
     self.train,self.validation,self.test = self.load_data()
-
     # 2, Prep Word Indexer: assign each word a number
-        # lower određuje pretvaramo li riječi u lowercase prije tokeniziranja
-    # self.indexer = Tokenizer(lower=False, filters='') # originalna linija
     self.indexer = Tokenizer(lower = self.LowercaseTokens, filters = '') # nova linija
-                            # filters = '#&*+-/;<=>@[\]^_`{|}~', # nova linija
-                            # num_words = 42394) # nova linija
-    
     # indexer fitamo nad training podacima
-    self.indexer.fit_on_texts(self.train[0] + self.train[1]) # todo remove test
+    self.indexer.fit_on_texts(self.train[0] + self.train[1])
     # self.Vocab je veličina vokabulara
     self.Vocab = len(self.indexer.word_counts) + 1
-
-    # 3, Convert each word in sent to num and zero pad
-    def padding(x, MaxLen):
-      return pad_sequences(sequences=self.indexer.texts_to_sequences(x), maxlen=MaxLen)
-    def pad_data(x):
-      return padding(x[0], self.SentMaxLen), padding(x[1], self.SentMaxLen), x[2]
-
-    self.train = pad_data(self.train)
-    self.validation = pad_data(self.validation)
-    self.test = pad_data(self.test)
-
+    print('Vocabulary size:', self.Vocab)
+    
+    # 3, Convert each word in set to num and zero pad
+    self.train = self.padd(self.train)
+    self.validation = self.padd(self.validation)
+    self.test = self.padd(self.test)
+    # if self.dataset == 'mnlisnli':
+      # self.load_smnli_data()
+    
   def load_GloVe(self):
     # Creat a embedding matrix for word2vec(use GloVe)
     # embed matrica sadrži embeddinge za riječi
@@ -181,7 +269,10 @@ class AttentionAlignmentModel:
     # embed_matrix = np.zeros((self.Vocab,self.EmbeddingSize)) # originalna linija
         # trebala bi se inicijalizirati na normalnu nasumičnu distribuciju
     # NOVI KOD -- POCETAK
-    if self.OOVWordInit == 'random':
+    # NAPOMENA TODO: embed matrica je dimenzija 300x(broj riječi u vokabularu) - ne može se reloadati kada se promijeni dataset
+    if self.dataset == 'mnlisnli' and os.path.exists(self.glove_path):
+        embed_matrix = np.load(self.glove_path)
+    elif self.OOVWordInit == 'random':
         embed_matrix = np.random.randn(self.Vocab,self.EmbeddingSize)
     elif self.OOVWordInit == 'zeros':
         embed_matrix = np.zeros((self.Vocab,self.EmbeddingSize))
@@ -194,7 +285,7 @@ class AttentionAlignmentModel:
         if vec is None: unregistered.append(word)
         # inače ju spremi u embed matricu na njenu poziciju
         else: embed_matrix[i] = vec
-    np.save('GloVe_' + self.dataset + '.npy',embed_matrix)
+    np.save(self.glove_path, embed_matrix)
     open('unregisterd_word.txt','w').write(str(unregistered))
 
   def load_GloVe_dict(self):
@@ -206,16 +297,26 @@ class AttentionAlignmentModel:
   @time_count
   def prep_embd(self):
     # Add a Embed Layer to convert word index to vector
-    if not os.path.exists('GloVe_' + self.dataset + '.npy') or self.RetrainEmbeddings:
-        self.load_GloVe()
-    embed_matrix = np.load('GloVe_' + self.dataset + '.npy')
+    if self.dataset != 'mnlisnli':
+      self.glove_path = 'GloVe_' + self.dataset + '.npy'
+    if 'ConfigTimestamp' in self.Options:
+      self.glove_path = self.Options['ConfigTimestamp'] + '_GloVe_' + self.dataset + '.npy'
+    
+    # kod joint treniranja uvijek brišemo prethodnu embed matricu ako postoji i 
+    # ako ju ne pokušavamo učitati radi evaluacije
+    # if self.dataset == 'mnlisnli' and os.path.exists(glove_path) and 'ConfigTimestamp' not in self.Options:
+        # os.remove(glove_path)
+    if not os.path.exists(self.glove_path) or self.RetrainEmbeddings:
+      self.load_GloVe()
+    # učitavamo upravo napravljenu embed matricu
+    embed_matrix = np.load(self.glove_path)
     self.Embed = Embedding(input_dim = self.Vocab,
                            output_dim = self.EmbeddingSize,
                            input_length = self.SentMaxLen,
                            # originalna linija: False, određuje trenirabilnost word embeddinga
                            trainable = self.TrainableEmbeddings,
                            weights = [embed_matrix],
-                           name = 'embed_snli')
+                           name = 'embed_' + self.dataset.upper())
 
   # TODO Decomposable Attention Model by Ankur P. Parikh et al. 2016
   def create_standard_attention_model(self, test_mode = False):
@@ -397,6 +498,7 @@ class AttentionAlignmentModel:
                   name='judge300_' + self.dataset)(Final)
     self.model = Model(inputs=[premise, hypothesis], outputs=Final)
 
+    
   @time_count
   def compile_model(self):
     """ Load Possible Existing Weights and Compile the Model """
@@ -410,24 +512,18 @@ class AttentionAlignmentModel:
     if os.path.exists(fn) and self.LoadExistingWeights: # nova linija: dodana provjera za self.LoadExistingWeights
         self.model.load_weights(fn, by_name=True)
         print('--------Load Weights Successful!--------')
-    # nove 2 linije: brišemo postojeće weighte ako ih ne koristimo
-    # elif os.path.exists(fn):
-        # os.remove(fn)
          
   # returns history of train/val loss/acc values
   def start_train(self):
     """ Starts to Train the entire Model Based on set Parameters """
     # 1, Prep
-    # callback = [EarlyStopping(patience=self.Patience), # originalno
     callback = [EarlyStopping(patience=self.Patience, verbose=2),
-                # LambdaCallback(on_epoch_end)
                 ReduceLROnPlateau(patience=5, verbose=1),
                 CSVLogger(filename=self.rnn_type+'log.csv'),
                 # ModelCheckpoint(filepath=self.rnn_type + '_' + self.dataset + '.check',
-                ModelCheckpoint(filepath=self.rnn_type + '_' + self.dataset + 'weights.{epoch:02d}-{val_loss:.2f}.check',
+                ModelCheckpoint(filepath=self.Timestamp + '_' + self.dataset + 'weights.{epoch:02d}-{val_loss:.2f}.check',
                                 save_best_only=False,
                                 save_weights_only=True)]
-
     # 2, Train
     self.History = self.model.fit(x = [self.train[0],self.train[1]],
                    y = self.train[2],
@@ -437,39 +533,31 @@ class AttentionAlignmentModel:
                    # promijenjena linija jer se self.test već koristi u evaluate_on_test()
                    validation_data=([self.validation[0], self.validation[1]], self.validation[2]),
                    callbacks = callback)
-    # self.model.save('ESIM.h5')
-    # self.model.load_weights(self.rnn_type + '_' + self.dataset + '.check') # revert to the best model
+    self.Options['History'] = self.History.history
     self.format_report()
     return self.History
     # 3, Evaluate
-    
     # self.evaluate_on_test() # originalna linija
     # self.evaluate_on_set(set = 'validation')
     # self.evaluate_on_set(set = 'test')
 
   # def evaluate_on_test(self):
-  #MNLI test = validation_{mis}matched
-  #SNLI test = test | validation | train
+  # eval_set: proslijediti točno ime datoteke nad kojom želimo testirati (bez ekstenzije)
   def evaluate_on_set(self, eval_set = 'snli_test', filename = None):
     # provjerava valjanost eval_set argumenta
     assert eval_set in ['snli_validation', 'snli_test', 
                          'mnli_validation_matched',
                          'mnli_validation_mismatched']
     dataset = None
-    # učitava trenirane weighte modela (ako postoje)
-    if filename is not None:
-        self.model.load_weights(filename) # revert to the best model
+    
+    if filename is not None: # učitava weighte iz dane datoteke
+        self.model.load_weights(filename)
+    # ili pokušava defaultne weighte
     elif os.path.exists(self.rnn_type + '_' + self.dataset + '.check'):
         self.model.load_weights(self.rnn_type + '_' + self.dataset + '.check') # revert to the best model
-    else:
+    else: # inače inicijalizira random
         print('No weights found for model!')
         print('Using random initialized weights...')
-    # pomoćne funkcije iz prep_data() TODO boilerplate code
-    def padding(x, MaxLen):
-        return pad_sequences(sequences=self.indexer.texts_to_sequences(x), maxlen=MaxLen)
-    def pad_data(x):
-        return padding(x[0], self.SentMaxLen), padding(x[1], self.SentMaxLen), x[2]
-    # provjerava nad vlastitim skupom (podržava SNLI i MNLI)
     # ako testiramo nad istim datasetom, učitaj ga iz članskih varijabli
     if (self.dataset == 'snli' and 'snli' in eval_set) or (self.dataset == 'mnli' and 'mnli' in eval_set):
         if eval_set == 'snli_validation' or eval_set == 'mnli_validation_matched':
@@ -481,7 +569,7 @@ class AttentionAlignmentModel:
         print('Loading ' + eval_set + ' data...')
         dataset = json.loads(open(eval_set + '.json', 'r').read())
         dataset[2] = np_utils.to_categorical(dataset[2], 3)
-        dataset = pad_data(dataset)
+        dataset = self.padd(dataset)
     # evaluacija
     loss, acc = self.model.evaluate([dataset[0], dataset[1]], 
                                     dataset[2], batch_size=self.BatchSize)

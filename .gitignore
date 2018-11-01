@@ -9,6 +9,7 @@ esim_*.txt
 
 #rest of generated files
 EAM*.*
+*.check
 *.npy
 unregisterd_word.txt
 pred_vld.txt
