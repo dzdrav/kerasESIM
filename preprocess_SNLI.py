@@ -3,14 +3,14 @@ import json
 #LABEL_MAP = {"entailment": 0, "neutral": 1,"contradiction": 2 }
 labels = {'contradiction': 0, 'neutral': 1, 'entailment': 2}
 
-def load_data(path):
+def load_data(path, additional_label = None):
     # LABEL_MAP = ispravni labeli
     LABEL_MAP = {'contradiction': 0, 'neutral': 1, 'entailment': 2}
     print("Loading", path)
-    #examples = []
     prems_arr = []
     hypos_arr = []
     label_arr = []
+    category_arr = [] # žanr
     skipped_examples = []
     # otvaramo datoteku za čitanje
     with open(path, 'r') as f:
@@ -30,10 +30,15 @@ def load_data(path):
             prems_arr.append(loaded_example["sentence1"])
             hypos_arr.append(loaded_example["sentence2"])
             label_arr.append(LABEL_MAP[loaded_example["gold_label"]])
+            if additional_label is not None:
+                category_arr.append(loaded_example[additional_label])
 
     print("Loaded {}/{}/{} Skipped {}".format(len(prems_arr), len(hypos_arr), len(label_arr), len(skipped_examples)))
 
-    return (prems_arr, hypos_arr, label_arr)
+    if additional_label is not None:
+        return (prems_arr, hypos_arr, label_arr, category_arr)
+    else:
+        return (prems_arr, hypos_arr, label_arr)
 
 if  __name__ == '__main__':
     """

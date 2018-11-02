@@ -15,6 +15,7 @@ unregisterd_word.txt
 pred_vld.txt
 *.csv
 trials/
+models/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

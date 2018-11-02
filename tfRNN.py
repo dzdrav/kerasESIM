@@ -43,13 +43,6 @@ def time_count(fn):
     return returns
   return _wrapper
 
-class ResampleSnli(keras.callbacks.Callback):
-  def __init__(self, model):
-    self.ParentModel = model
-  def on_epoch_end(self, batch, logs):
-    self.ParentModel.merge_snli_into_mnli()
-  # def on_train_begin(self, logs):
-    # self.ParentModel.merge_snli_into_mnli()
 
 class AttentionAlignmentModel:
 # prima options dictionary koji inicijalizira hiperparametre
@@ -100,24 +93,23 @@ class AttentionAlignmentModel:
 
     # 2, Define Class Variable
     self.Options = options
-    self.Options['Timestamp'] = time.strftime('%Y%m%d%H%M', time.localtime())
+    self.Options['Timestamp'] = time.strftime('%Y%m%d%H%M', time.localtime()) if 'ConfigTimestamp' not in options else options['ConfigTimestamp']
     self.Timestamp = self.Options['Timestamp']
+    self.ResultFilepath = 'models/' + self.Timestamp + '_model/'
     self.History = None
     # self.Verbose = 0
     self.Vocab = 0
     self.model = None
     self.GloVe = defaultdict(np.array)
-    self.glove_path = self.Timestamp + '_GloVe_' + self.dataset + '.npy'
+    self.glove_path = self.ResultFilepath + self.Timestamp + '_GloVe_' + self.dataset + '.npy'
     self.indexer,self.Embed = None, None
     self.train, self.validation, self.test = [],[],[]
-    # služe za istovremeno treniranje SNLI+MNLI
-    self.mnli_train, self.snli_train = [], []
     self.Labels = {'contradiction': 0, 'neutral': 1, 'entailment': 2}
     self.rLabels = {0:'contradiction', 1:'neutral', 2:'entailment'}
 
   # zapisuje report s hiperparametrima i statistikom učenja
   def format_report(self):
-      outFile = self.Timestamp + '_ESIM_' + self.dataset.upper() + '_report.json'
+      outFile = self.ResultFilepath + self.Timestamp + '_ESIM_' + self.dataset.upper() + '_report.json'
       with open(outFile, 'w', encoding='utf-8') as outFile:
           dump(self.Options, outFile, indent=2)
 
@@ -129,6 +121,7 @@ class AttentionAlignmentModel:
     return pad_data(x)
   
   def load_data(self):
+    self.model_mkdir()
     if self.dataset == 'snli':
       trn = json.loads(open('snli_train.json', 'r').read())
       vld = json.loads(open('snli_validation.json', 'r').read())
@@ -150,31 +143,32 @@ class AttentionAlignmentModel:
       tst = json.loads(open('mnli_validation_mismatched.json', 'r').read())
 
       """
-      ako želimo evaluirati model s postojećim weightima, treba učitati iste 
+      ako želimo evaluirati model s postojećim weightima, treba učitati iste
       train i val primjere. Treba dati Timestamp u options['ConfigTimestamp']
-      json datoteke gdje se te konfiguracije nalaze.
+      json datoteke gdje se te nalaze random konfig. tada izabranih primjera.
       Ako options['ConfigTimestamp'] ne postoji, biraju se random primjeri
-      i spremaju u json datoteku za kasnije korištenje
+      i spremaju u json datoteku za reproducibilnost rezultata kasnije.
       """
+      # validacijski skup
       subset = [[],[],[]]
       if 'ConfigTimestamp' in self.Options: # ako postoji timestamp u Options
-        indices = json.load(open(self.Options['ConfigTimestamp'] + '_validconfig.json', 'r'))
+        indices = json.load(open(self.ResultFilepath + self.Options['ConfigTimestamp'] + '_validconfig.json', 'r'))
       else: # inače generiraj nasumično
         indices = random.sample(range(len(vld2[0])), 2000)
-        json.dump(indices, open(self.Timestamp + '_validconfig.json', 'w'))
+        json.dump(indices, open(self.ResultFilepath + self.Timestamp + '_validconfig.json', 'w'))
       # spajanje s MNLI val skupom
       for index in indices:
         for i in range(3):
           subset[i].append(vld2[i][index])
       for i in range(3):
         vld[i].extend(subset[i])
-
+      # trening skup
       subset = [[],[],[]]
       if 'ConfigTimestamp' in self.Options: # ako postoji timestamp u Options
-        indices = json.load(open(self.Options['ConfigTimestamp'] + '_trainconfig.json', 'r'))
+        indices = json.load(open(self.ResultFilepath + self.Options['ConfigTimestamp'] + '_trainconfig.json', 'r'))
       else: # inače generiraj nasumično
         indices = random.sample(range(len(trn2[0])), int(0.15 * len(trn2[0]) ) )
-        json.dump(indices, open(self.Timestamp + '_trainconfig.json', 'w'))
+        json.dump(indices, open(self.ResultFilepath + self.Timestamp + '_trainconfig.json', 'w'))
       # spajanje s MNLI train skupom
       for index in indices:
         for i in range(3):
@@ -191,53 +185,12 @@ class AttentionAlignmentModel:
     
     return trn, vld, tst
 
-  # učitava oba dataseta iz datoteke u članske varijable (NE VRAĆA ništa)
-  def load_smnli_data(self):
-    snli = json.loads(open('snli_train.json', 'r').read())
-    mnli = json.loads(open('mnli_train.json', 'r').read())
-        
-    # snli[2] = np_utils.to_categorical(snli[2], 3)
-    # mnli[2] = np_utils.to_categorical(mnli[2], 3)
-    
-    self.snli_train, self.mnli_train = snli, mnli
-
-  # pretvara train skup u MNLI + 0.15*SNLI
-  def prep_snli_train_data(self):
-    # 0, praznimo trening skup
-    del self.train
-    self.train = [[],[],[]]
-    subset = [[],[],[]]
-
-    # 1, uzimamo random sample 15% indeksa SNLI-a
-    indices = random.sample(range(len(self.snli_train[0])), int(0.15 * len(self.snli_train[0]) ) )
-    # prolazimo kroz izabrane indekse i spremamo parove u novu listu
-    for index in indices:
-        for i in range(3):
-            subset[i].append(self.snli_train[i][index])
-    
-    # 2, spremamo nove rečenice u trening skup
-    for i in range(3):
-        self.train[i].extend(subset[i])
-        self.train[i].extend(self.mnli_train[i])
-      
-    # 3, treniramo indexer nad novim riječima
-    # self.indexer.fit_on_texts(subset[0] + subset[1])
-    del self.indexer
-    self.indexer = Tokenizer(lower = self.LowercaseTokens, filters = '') # nova linija
-    self.indexer.fit_on_texts(self.train[0] + self.train[1])
-    self.Vocab = len(self.indexer.word_counts) + 1
-    # želimo da se vel. vokabulara ne mijenja između epoha (pri retreniranju self.train)
-    # self.Vocab = 180000 #TODO privremeno rješenje bazirano na n=175528, 175644, smisliti bolje
-    
-    self.train[2] = np_utils.to_categorical(self.train[2], 3)
-    self.train = self.padd(self.train)
-
-  # priprema train set + indexer za novu epohu
-  # @time_count
-  # def merge_snli_into_mnli(self):
-    # self.prep_snli_train_data()
-    # self.prep_embd()
-
+  def model_mkdir(self):
+    if not os.path.exists('models/'):
+      os.mkdir('models/')
+    if not os.path.exists(self.ResultFilepath):
+      os.mkdir(self.ResultFilepath)
+  
   @time_count
   def prep_data(self):
     # 1, Read raw Training,Validation and Test data
@@ -254,8 +207,6 @@ class AttentionAlignmentModel:
     self.train = self.padd(self.train)
     self.validation = self.padd(self.validation)
     self.test = self.padd(self.test)
-    # if self.dataset == 'mnlisnli':
-      # self.load_smnli_data()
     
   def load_GloVe(self):
     # Creat a embedding matrix for word2vec(use GloVe)
@@ -298,9 +249,9 @@ class AttentionAlignmentModel:
   def prep_embd(self):
     # Add a Embed Layer to convert word index to vector
     if self.dataset != 'mnlisnli':
-      self.glove_path = 'GloVe_' + self.dataset + '.npy'
+      self.glove_path = self.ResultFilepath + 'GloVe_' + self.dataset + '.npy'
     if 'ConfigTimestamp' in self.Options:
-      self.glove_path = self.Options['ConfigTimestamp'] + '_GloVe_' + self.dataset + '.npy'
+      self.glove_path = self.ResultFilepath + self.Options['ConfigTimestamp'] + '_GloVe_' + self.dataset + '.npy'
     
     # kod joint treniranja uvijek brišemo prethodnu embed matricu ako postoji i 
     # ako ju ne pokušavamo učitati radi evaluacije
@@ -521,7 +472,9 @@ class AttentionAlignmentModel:
                 ReduceLROnPlateau(patience=5, verbose=1),
                 CSVLogger(filename=self.rnn_type+'log.csv'),
                 # ModelCheckpoint(filepath=self.rnn_type + '_' + self.dataset + '.check',
-                ModelCheckpoint(filepath=self.Timestamp + '_' + self.dataset + 'weights.{epoch:02d}-{val_loss:.2f}.check',
+                ModelCheckpoint(filepath = self.ResultFilepath + self.Timestamp 
+                                            + '_' + self.dataset 
+                                            + 'weights.{epoch:02d}-{val_loss:.2f}.check',
                                 save_best_only=False,
                                 save_weights_only=True)]
     # 2, Train
@@ -543,15 +496,15 @@ class AttentionAlignmentModel:
 
   # def evaluate_on_test(self):
   # eval_set: proslijediti točno ime datoteke nad kojom želimo testirati (bez ekstenzije)
-  def evaluate_on_set(self, eval_set = 'snli_test', filename = None):
+  def evaluate_on_set(self, eval_set = 'snli_test', weights_file = None):
     # provjerava valjanost eval_set argumenta
     assert eval_set in ['snli_validation', 'snli_test', 
                          'mnli_validation_matched',
                          'mnli_validation_mismatched']
     dataset = None
     
-    if filename is not None: # učitava weighte iz dane datoteke
-        self.model.load_weights(filename)
+    if weights_file is not None: # učitava weighte iz dane datoteke
+        self.model.load_weights(self.ResultFilepath + weights_file)
     # ili pokušava defaultne weighte
     elif os.path.exists(self.rnn_type + '_' + self.dataset + '.check'):
         self.model.load_weights(self.rnn_type + '_' + self.dataset + '.check') # revert to the best model
@@ -578,36 +531,51 @@ class AttentionAlignmentModel:
     print('Trained on: ' + self.dataset.upper())
     print('Evaluated on: ' + eval_set.title() + ": loss = {:.5f}, acc = {:.4f}%".format(loss, acc))
     return (loss, acc)
-    # TODO ovaj dalje dio funkcije (RTE) nije održavan, treba ga uskladiti sa SNLI dijelom
-    # elif self.dataset == 'rte':
-      # true_posi, real_true, pred_true = 0, 0, 0
-      # count, left, stime = 0, len(self.test[0]), time.time()
-      # for prem, hypo, truth in zip(self.test[0], self.test[1], self.test[2]):
-      # for prem, hypo, truth in zip(self.train[0], self.train[1], self.train[2]):
-        # prem = np.expand_dims(np.reshape(prem, -1), 0)
-        # hypo = np.expand_dims(np.reshape(hypo, -1), 0)
-        # predict = np.reshape(self.model.predict(x=[prem, hypo], batch_size=1), -1)
-        # predict, truth = np.argmax(predict), np.argmax(truth)
-        # if predict == truth and truth == 1:
-          # true_posi += 1
-        # if predict == 1:
-          # pred_true += 1
-        # if truth == 1:
-          # real_true += 1
-        # count += 1
-        # if len(self.test[0]) - left >= 1024: break
-        # if time.time() - stime > 1:
-          # stime = time.time()
-          # left -= count
-          # print("{}/s | {}/{} | {:.0f} | p = {:.3f} | r = {:.3f}".format(count, len(self.test[0]) - left,
-                                                                     # len(self.test[0]), left / count,
-                                                                     # true_posi / pred_true,
-                                                                     # true_posi / real_true))
-          # count = 0
-      # print("true_posi = {}, real_true = {}, pred_true = {}".format(true_posi, real_true, pred_true))
-      # p, r = true_posi/pred_true, true_posi/real_true
-      # print("prec = {:.4f}, recall = {:.4f}, 2pr/(p+r) = {:.4f}".format(p, r, 2*p*r/(p+r)))
 
+  def evaluate_on_test_sets(self, weights_file = None):
+    results = {}
+    score = {}
+    # evaluiramo nad svim test setovima
+    for set in ['snli_test', 'mnli_validation_matched','mnli_validation_mismatched']:
+      results[set] = {}
+      results[set]['loss'], results[set]['acc'] = self.evaluate_on_set(eval_set = set, weights_file = weights_file)
+      # results[set] = score
+    # dumpamo rezultate u datoteku
+    dump(results, open(self.ResultFilepath + self.Timestamp + '_test_results.json', 'w'), indent = 2)
+    
+  # evaluira model nad SVIM MNLI kategorijama: matched i mismatched
+  def evaluate_on_all_mnli_categories(self, weights_file = None):
+    if weights_file is not None: # učitava weighte iz dane datoteke
+        self.model.load_weights(self.ResultFilepath + weights_file)
+    sets = ['mnli_validation_matched', 
+            'mnli_validation_mismatched']
+    results = {}
+    for eval_set in sets:
+        print('Loading ' + eval_set + ' data...')
+        dataset = json.loads(open(eval_set + '.json', 'r').read())
+        all_categories = list(set( dataset[3] ))
+        
+        for category in all_categories:
+            subdataset = [[],[],[]]
+            print('Category: ' + category)
+            for i in range(len(dataset[0])):
+                if dataset[3][i] == category:
+                    for j in range(3):
+                        subdataset[j].append(dataset[j][i])
+                    # print(subdataset[0][0])
+                    # print(subdataset[1][0])
+                    # print(subdataset[2][0])
+                    # return
+            subdataset[2] = np_utils.to_categorical(subdataset[2], 3)
+            subdataset = self.padd(subdataset)
+            result = {}
+            result['loss'], result['acc'] = self.model.evaluate([subdataset[0], subdataset[1]], 
+                                            subdataset[2], 
+                                            batch_size=self.BatchSize)
+            results[category] = result
+    dump(results, open(self.ResultFilepath + self.Timestamp + '_categoric_results.json', 'w'), indent = 2)
+        
+        
   def evaluate_rte_by_snli_model(self, threshold = 0.5):
     assert self.dataset == 'snli'
     def padding(x, MaxLen):
