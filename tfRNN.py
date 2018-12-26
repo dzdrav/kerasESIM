@@ -45,49 +45,40 @@ def time_count(fn):
 
 
 class AttentionAlignmentModel:
-# prima options dictionary koji inicijalizira hiperparametre
-  # def __init__(self, annotation ='biGRU', dataset = 'snli'):
+# accepts options dict with hyperparameters
   def __init__(self, options, annotation ='biGRU', dataset = 'snli'):
     # 1, Set Basic Model Parameters
     self.Layers = 1
-    self.EmbeddingSize = 300
+    self.EmbeddingSize = 300 # size of projected embeddings
     self.BatchSize = options['BatchSize'] if 'BatchSize' in options else 128
-    # patience za early stopping
-    # self.Patience = 8 # originalna vrijednost
-    self.Patience = 7 # u izvornom kodu Chen et.al.
-    # self.Patience = 6 # vlastiti izbor
+    self.Patience = 7 # original Chen et.al.
     self.MaxEpoch = 25
-    self.SentMaxLen = 42 if dataset == 'snli' else 50 # snli: 42, mnli: 50 default
-    # self.SentMaxLen = 100 # uočeno u izvornom kodu Chen et.al.
-    # self.DropProb = 0.4 # originalna vrijednost
-    self.DropProb = 0.5 # navedeno u radu Chen et.al.
-    # self.L2Strength = 1e-5 # originalna linija
+    self.SentMaxLen = 42 if dataset == 'snli' else 50
+    self.DropProb = 0.5 # original Chen et.al.
     self.L2Strength = options['L2Strength'] if 'L2Strength' in options else 0.0
     self.Activate = 'relu'
     self.GradientClipping = options['GradientClipping'] if 'GradientClipping' in options else 10.0
     # self.Optimizer = 'rmsprop' # originalna vrijednost
     self.LearningRate = options['LearningRate'] if 'LearningRate' in options else 4e-4
     if 'Optimizer' not in options or options['Optimizer'] == 'nadam':
-        self.Optimizer = keras.optimizers.Nadam(lr = self.LearningRate, 
-            clipnorm = self.GradientClipping) 
+        self.Optimizer = keras.optimizers.Nadam(lr = self.LearningRate,
+            clipnorm = self.GradientClipping)
     elif options['Optimizer'] == 'adam': # u radu naveden Adam, orig. rmsprop
-        self.Optimizer = keras.optimizers.Adam(lr = self.LearningRate, 
-            clipnorm = self.GradientClipping) 
+        self.Optimizer = keras.optimizers.Adam(lr = self.LearningRate,
+            clipnorm = self.GradientClipping)
     elif options['Optimizer'] == 'rmsprop':
-        self.Optimizer = keras.optimizers.RMSprop(lr = self.LearningRate, 
-            clipnorm = self.GradientClipping) 
+        self.Optimizer = keras.optimizers.RMSprop(lr = self.LearningRate,
+            clipnorm = self.GradientClipping)
     self.rnn_type = annotation
-    self.dataset = dataset    
-    
-    # modifikacije treniranja modela
-    # pretvaramo li tokene u lowercase prije obrade
+    self.dataset = dataset
+
+    # whether to change tokens to lowercase before training
     self.LowercaseTokens = options['LowercaseTokens'] if 'LowercaseTokens' in options else True
-        # promjena LowercaseTokens zahtijeva postavljanje RetrainEmbeddings na True 
-    # RetrainEmbeddings=True: ponovno treniramo word embeddinge prije treninga modela
-    self.RetrainEmbeddings = options['RetrainEmbeddings'] if 'RetrainEmbeddings' in options else False
-    self.LoadExistingWeights = False # True: učitavamo postojeće weighte za model
-    self.TrainableEmbeddings = True # True: model ažurira word embeddinge tijekom treninga
-    # True: zadnji dropout layer ima 1/2 faktor dropouta
+        # changing this value requires setting RetrainEmbeddings to True
+    self.RetrainEmbeddings = options['RetrainEmbeddings'] if 'RetrainEmbeddings' in options else True
+    self.LoadExistingWeights = False # True: loading existing model weights
+    self.TrainableEmbeddings = True # True: update word embeddings during training
+    # True: last dropout layer has 1/2 of dropout factor
     self.LastDropoutHalf = options['LastDropoutHalf'] if 'LastDropoutHalf' in options else False
     self.OOVWordInit = options['OOVWordInit'] if 'OOVWordInit' in options else 'zeros'
 
@@ -107,19 +98,21 @@ class AttentionAlignmentModel:
     self.Labels = {'contradiction': 0, 'neutral': 1, 'entailment': 2}
     self.rLabels = {0:'contradiction', 1:'neutral', 2:'entailment'}
 
-  # zapisuje report s hiperparametrima i statistikom učenja
+  # writes a report containing hyperparameters and learning details
   def format_report(self):
       outFile = self.ResultFilepath + self.Timestamp + '_ESIM_' + self.dataset.upper() + '_report.json'
       with open(outFile, 'w', encoding='utf-8') as outFile:
           dump(self.Options, outFile, indent=2)
 
+  # helper function for data preprocessing - pads sentences to same length
   def padd(self, x):
     def padding(x, MaxLen):
       return pad_sequences(sequences=self.indexer.texts_to_sequences(x), maxlen=MaxLen)
     def pad_data(x):
       return padding(x[0], self.SentMaxLen), padding(x[1], self.SentMaxLen), x[2]
     return pad_data(x)
-  
+
+  # loads data depending on declared dataset
   def load_data(self):
     self.model_mkdir()
     if self.dataset == 'snli':
@@ -143,46 +136,48 @@ class AttentionAlignmentModel:
       tst = json.loads(open('mnli_validation_mismatched.json', 'r').read())
 
       """
-      ako želimo evaluirati model s postojećim weightima, treba učitati iste
-      train i val primjere. Treba dati Timestamp u options['ConfigTimestamp']
-      json datoteke gdje se te nalaze random konfig. tada izabranih primjera.
-      Ako options['ConfigTimestamp'] ne postoji, biraju se random primjeri
-      i spremaju u json datoteku za reproducibilnost rezultata kasnije.
+      Since joint training randomly picks 15% of SNLI examples, to evaluate such
+      trained model, you need to provide timestamp of JSON file containing
+      which random examples were picked for training so that same embeddings
+      could be loaded into the model for evaluation. Why? Because embeddings are
+      trainable which makes them model parameters, which requires same
+      embeddings to be loaded when evaluating model as when that same model was
+      trained. Provide timestamp of trained model in options['ConfigTimestamp'].
+      If not provided, random examples are picked and saved to JSON for later
+      reproducibility.
       """
-      # validacijski skup
+      # validation set
       subset = [[],[],[]]
-      if 'ConfigTimestamp' in self.Options: # ako postoji timestamp u Options
+      if 'ConfigTimestamp' in self.Options: # if timestamp exists, load examples
         indices = json.load(open(self.ResultFilepath + self.Options['ConfigTimestamp'] + '_validconfig.json', 'r'))
-      else: # inače generiraj nasumično
+      else: # else pick randomly
         indices = random.sample(range(len(vld2[0])), 2000)
         json.dump(indices, open(self.ResultFilepath + self.Timestamp + '_validconfig.json', 'w'))
-      # spajanje s MNLI val skupom
+      # merging with MNLI
       for index in indices:
         for i in range(3):
           subset[i].append(vld2[i][index])
       for i in range(3):
         vld[i].extend(subset[i])
-      # trening skup
+      # train set
       subset = [[],[],[]]
-      if 'ConfigTimestamp' in self.Options: # ako postoji timestamp u Options
+      if 'ConfigTimestamp' in self.Options:
         indices = json.load(open(self.ResultFilepath + self.Options['ConfigTimestamp'] + '_trainconfig.json', 'r'))
-      else: # inače generiraj nasumično
+      else:
         indices = random.sample(range(len(trn2[0])), int(0.15 * len(trn2[0]) ) )
         json.dump(indices, open(self.ResultFilepath + self.Timestamp + '_trainconfig.json', 'w'))
-      # spajanje s MNLI train skupom
       for index in indices:
         for i in range(3):
           subset[i].append(trn2[i][index])
       for i in range(3):
         trn[i].extend(subset[i])
     else:
-      raise ValueError('Unknown Dataset') # ispravljen typo, nova linija
-    
-    # ako želimo RTE dataset, drugi argument: (3 if self.dataset == 'snli' else 2)
+      raise ValueError('Unknown Dataset')
+
     trn[2] = np_utils.to_categorical(trn[2], 3)
     vld[2] = np_utils.to_categorical(vld[2], 3)
     tst[2] = np_utils.to_categorical(tst[2], 3)
-    
+
     return trn, vld, tst
 
   def model_mkdir(self):
@@ -190,7 +185,7 @@ class AttentionAlignmentModel:
       os.mkdir('models/')
     if not os.path.exists(self.ResultFilepath):
       os.mkdir(self.ResultFilepath)
-  
+
   @time_count
   def prep_data(self):
     # 1, Read raw Training,Validation and Test data
@@ -202,39 +197,35 @@ class AttentionAlignmentModel:
     # self.Vocab je veličina vokabulara
     self.Vocab = len(self.indexer.word_counts) + 1
     print('Vocabulary size:', self.Vocab)
-    
+
     # 3, Convert each word in set to num and zero pad
     self.train = self.padd(self.train)
     self.validation = self.padd(self.validation)
     self.test = self.padd(self.test)
-    
+
   def load_GloVe(self):
-    # Creat a embedding matrix for word2vec(use GloVe)
-    # embed matrica sadrži embeddinge za riječi
+    # Create an embedding matrix for word2vec (use GloVe)
+    # embedding matrix contains word embeddings for each word
     embed_index = {}
     for line in open('glove.840B.300d.txt','r'):
         value = line.split(' ') # Warning: Can't use split()! I don't know why...
         word = value[0]
         embed_index[word] = np.asarray(value[1:],dtype='float32')
-        # ovdje se embed matrica inicjializira na nule (originalno)
-    # embed_matrix = np.zeros((self.Vocab,self.EmbeddingSize)) # originalna linija
-        # trebala bi se inicijalizirati na normalnu nasumičnu distribuciju
-    # NOVI KOD -- POCETAK
-    # NAPOMENA TODO: embed matrica je dimenzija 300x(broj riječi u vokabularu) - ne može se reloadati kada se promijeni dataset
+    # embed matrix is of size 300*(no. of vocabulary words)
+    # hence it CANNOT be reloaded when changing dataset
     if self.dataset == 'mnlisnli' and os.path.exists(self.glove_path):
         embed_matrix = np.load(self.glove_path)
     elif self.OOVWordInit == 'random':
         embed_matrix = np.random.randn(self.Vocab,self.EmbeddingSize)
     elif self.OOVWordInit == 'zeros':
         embed_matrix = np.zeros((self.Vocab,self.EmbeddingSize))
-    # NOVI KOD -- KRAJ
-    
+
     unregistered = []
     for word,i in self.indexer.word_index.items():
         vec = embed_index.get(word)
-        # ako riječ vec indeksa [word] nije u word_indexu, dodaj ju na popis OOV riječi
+        # if word with index 'vec' not in word_index, add it to out-of-voc list
         if vec is None: unregistered.append(word)
-        # inače ju spremi u embed matricu na njenu poziciju
+        # else save it in embedding matrix on its position
         else: embed_matrix[i] = vec
     np.save(self.glove_path, embed_matrix)
     open('unregisterd_word.txt','w').write(str(unregistered))
@@ -247,99 +238,28 @@ class AttentionAlignmentModel:
 
   @time_count
   def prep_embd(self):
-    # Add a Embed Layer to convert word index to vector
+    # Add Embed Layer to convert word index to vector
     if self.dataset != 'mnlisnli':
       self.glove_path = self.ResultFilepath + 'GloVe_' + self.dataset + '.npy'
     if 'ConfigTimestamp' in self.Options:
       self.glove_path = self.ResultFilepath + self.Options['ConfigTimestamp'] + '_GloVe_' + self.dataset + '.npy'
-    
-    # kod joint treniranja uvijek brišemo prethodnu embed matricu ako postoji i 
-    # ako ju ne pokušavamo učitati radi evaluacije
+
+    # with joint training, we always delete previous embedding matrix
     # if self.dataset == 'mnlisnli' and os.path.exists(glove_path) and 'ConfigTimestamp' not in self.Options:
         # os.remove(glove_path)
     if not os.path.exists(self.glove_path) or self.RetrainEmbeddings:
       self.load_GloVe()
-    # učitavamo upravo napravljenu embed matricu
+    # loading freshly made embedding matrix
     embed_matrix = np.load(self.glove_path)
     self.Embed = Embedding(input_dim = self.Vocab,
                            output_dim = self.EmbeddingSize,
                            input_length = self.SentMaxLen,
-                           # originalna linija: False, određuje trenirabilnost word embeddinga
                            trainable = self.TrainableEmbeddings,
                            weights = [embed_matrix],
                            name = 'embed_' + self.dataset.upper())
 
-  # TODO Decomposable Attention Model by Ankur P. Parikh et al. 2016
-  def create_standard_attention_model(self, test_mode = False):
-    ''' This model is Largely based on [A Decomposable Attention Model, Ankur et al.] '''
-    # 0, (Optional) Set the upper limit of GPU memory
-    config = tf.ConfigProto()
-    config.gpu_options.per_process_gpu_memory_fraction = 0.2
-    set_session(tf.Session(config=config))
 
-    # 1, Embedding the input and project the embeddings
-    premise = Input(shape=(self.SentMaxLen,), dtype='int32')
-    hypothesis = Input(shape=(self.SentMaxLen,), dtype='int32')
-    embed_p = self.Embed(premise) # [batchsize, Psize, Embedsize]
-    embed_h = self.Embed(hypothesis) # [batchsize, Hsize, Embedsize]
-    EmbdProject = TimeDistributed(Dense(200,
-                                   activation='relu',
-                                   kernel_regularizer=l2(self.L2Strength),
-                                   bias_regularizer=l2(self.L2Strength)))
-    embed_p = Dropout(self.DropProb)(EmbdProject(embed_p)) # [batchsize, Psize, units]
-    embed_h = Dropout(self.DropProb)(EmbdProject(embed_h)) # [batchsize, Hsize, units]
-
-    # 2, Score each embeddings and calc score matrix Eph.
-    F_p, F_h = embed_p, embed_h
-    for i in range(2): # Applying Decomposable Score Function
-      scoreF = TimeDistributed(Dense(200,
-                                     activation='relu',
-                                     kernel_regularizer=l2(self.L2Strength),
-                                     bias_regularizer=l2(self.L2Strength)))
-      F_p = Dropout(self.DropProb)(scoreF(F_p)) # [batch_size, Psize, units]
-      F_h = Dropout(self.DropProb)(scoreF(F_h)) # [batch_size, Hsize, units]
-    Eph = keras.layers.Dot(axes=(2, 2))([F_p, F_h]) # [batch_size, Psize, Hsize]
-
-    # 3, Normalize score matrix and get alignment
-    Ep = Lambda(lambda x:keras.activations.softmax(x))(Eph) # [batch_size, Psize, Hsize]
-    Eh = keras.layers.Permute((2, 1))(Eph) # [batch_size, Hsize, Psize)
-    Eh = Lambda(lambda x:keras.activations.softmax(x))(Eh) # [batch_size, Hsize, Psize]
-    PremAlign = keras.layers.Dot((2, 1))([Ep, embed_h])
-    HypoAlign = keras.layers.Dot((2, 1))([Eh, embed_p])
-
-    # 4, Concat original and alignment, score each pair of alignment
-    PremAlign = keras.layers.concatenate([embed_p, PremAlign]) # [batch_size, PreLen, 2*Size]
-    HypoAlign = keras.layers.concatenate([embed_h, HypoAlign])# [batch_size, Hypo, 2*Size]
-    for i in range(2):
-      scoreG = TimeDistributed(Dense(200,
-                                     activation='relu',
-                                     kernel_regularizer=l2(self.L2Strength),
-                                     bias_regularizer=l2(self.L2Strength)))
-      PremAlign = scoreG(PremAlign) # [batch_size, Psize, units]
-      HypoAlign = scoreG(HypoAlign) # [batch_size, Hsize, units]
-      PremAlign = Dropout(self.DropProb)(PremAlign)
-      HypoAlign = Dropout(self.DropProb)(HypoAlign)
-
-    # 5, Sum all these scores, and make final judge according to sumed-score
-    SumWords = Lambda(lambda X: K.reshape(K.sum(X, axis=1, keepdims=True), (-1, 200)))
-    V_P = SumWords(PremAlign) # [batch_size, 512]
-    V_H = SumWords(HypoAlign) # [batch_size, 512]
-    final = keras.layers.concatenate([V_P, V_H])
-    for i in range(2):
-      final = Dense(200,
-                    activation='relu',
-                    kernel_regularizer=l2(self.L2Strength),
-                    bias_regularizer=l2(self.L2Strength))(final)
-      final = Dropout(self.DropProb)(final)
-      final = BatchNormalization()(final)
-
-    # 6, Prediction by softmax
-    final = Dense(2 if self.dataset == 'rte' else 3,
-                  activation='softmax')(final)
-    if test_mode: self.model = Model(inputs=[premise,hypothesis],outputs=[Ep, Eh, final])
-    else: self.model = Model(inputs=[premise, hypothesis], outputs=final)
-
-  # TODO Enhanced LSTM Attention model by Qian Chen et al. 2016
+  # Enhanced LSTM Attention model by Qian Chen et al. 2016
   def create_enhanced_attention_model(self):
     # 0, (Optional) Set the upper limit of GPU memory
     config = tf.ConfigProto()
@@ -353,19 +273,13 @@ class AttentionAlignmentModel:
     embed_h = self.Embed(hypothesis)  # [batchsize, Hsize, Embedsize]
 
     # 2, Encoder words with its surrounding context
-    # inicijalizacija težina ulazne matrice LSTM-a random Gauss distribucijom (kao u paper kodu)
-    # Encoder = Bidirectional(LSTM(units=300, return_sequences=True))  # originalna linija
-    # Encoder = Bidirectional(LSTM(units=300, return_sequences=True, kernel_initializer='RandomNormal')) # (nova linija)
+    # initialization of LSTM input matrix with random Gauss distr
     Encoder = Bidirectional(CuDNNLSTM(units=300, return_sequences=True, kernel_initializer='RandomNormal')) # nova linija - CuDNNLSTM
 
-        # originalno, dropout je išao NAKON BiLSTM enkodanja
-    # embed_p = Dropout(self.DropProb)(Encoder(embed_p)) # originalna linija
-    # embed_h = Dropout(self.DropProb)(Encoder(embed_h)) # originalna linija
-        # u paper kodu dropout ide PRIJE BiLSTM encodanja: sljedeće 4 linije
-    embed_p = Dropout(self.DropProb)(embed_p) # najprije dropout (nova linija)
-    embed_h = Dropout(self.DropProb)(embed_h) # najprije dropout (nova linija)
-    embed_p = Encoder(embed_p) # potom BiLSTM enkodiranje (nova linija)
-    embed_h = Encoder(embed_h) # potom BiLSTM enkodiranje (nova linija)
+    embed_p = Dropout(self.DropProb)(embed_p) # firstly dropout
+    embed_h = Dropout(self.DropProb)(embed_h) # firstly dropout
+    embed_p = Encoder(embed_p) # then BiLSTM encoding
+    embed_h = Encoder(embed_h) # then BiLSTM encoding
 
     # 2, Score each words and calc score matrix Eph.
     F_p, F_h = embed_p, embed_h
@@ -379,18 +293,13 @@ class AttentionAlignmentModel:
     HypoAlign = keras.layers.Dot((2, 1))([Eh, embed_p]) # [-1, Hsize, dim]
     mm_1 = keras.layers.Multiply()([embed_p, PremAlign])
     mm_2 = keras.layers.Multiply()([embed_h, HypoAlign])
-    # sb_1 = Lambda(lambda x: tf.subtract(x, PremAlign))(embed_p) # originalna linija, subtract layer
-    # sb_2 = Lambda(lambda x: tf.subtract(x, HypoAlign))(embed_h) # originalna linija, subtract layer
-    sb_1 = keras.layers.Subtract()([embed_p, PremAlign]) # u suštini trebalo bi biti isto (nova linija)
-    sb_2 = keras.layers.Subtract()([embed_h, HypoAlign]) # u suštini trebalo bi biti isto (nova linija)
+    sb_1 = keras.layers.Subtract()([embed_p, PremAlign])
+    sb_2 = keras.layers.Subtract()([embed_h, HypoAlign])
 
-    # konkatenacija [a_, a~, a_ * a~, a_ - a~], isto za b_, b~
+    # concat [a_, a~, a_ * a~, a_ - a~], isto za b_, b~
     PremAlign = keras.layers.Concatenate()([embed_p, PremAlign, sb_1, mm_1,])  # [batch_size, Psize, 2*unit]
     HypoAlign = keras.layers.Concatenate()([embed_h, HypoAlign, sb_2, mm_2])  # [batch_size, Hsize, 2*unit]
-        # u paperu nema ovog dropouta pa je zakomentiran
-    # PremAlign = Dropout(self.DropProb)(PremAlign) # originalna linija
-    # HypoAlign = Dropout(self.DropProb)(HypoAlign) # originalna linija
-    # ff layer sa RELU aktivacijama
+    # ff layer w/RELU activation
     Compresser = TimeDistributed(Dense(300,
                                        kernel_regularizer=l2(self.L2Strength),
                                        bias_regularizer=l2(self.L2Strength),
@@ -400,19 +309,12 @@ class AttentionAlignmentModel:
     HypoAlign = Compresser(HypoAlign)
 
     # 5, Final biLST < Encoder + Softmax Classifier
-    # Decoder = Bidirectional(LSTM(units=300, return_sequences=True), # originalna linija 
-		# inicijalizacija težina ulazne matrice LSTM-a random Gauss distribucijom (kao u paper kodu)
-    # Decoder = Bidirectional(LSTM(units=300, return_sequences=True, kernel_initializer='RandomNormal'),
-    Decoder = Bidirectional(CuDNNLSTM(units=300, return_sequences=True, kernel_initializer='RandomNormal'), # nova linija: CuDNNLSTM
-                            name='finaldecoder')  # [-1,2*units] # originalno: name='finaldecoer'
-        # originalne 2 linije: originalno dropout ide POSLIJE primjene dekodera nad PremAlign i HypoAlign
-    # final_p = Dropout(self.DropProb)(Decoder(PremAlign)) # originalna linija
-    # final_h = Dropout(self.DropProb)(Decoder(HypoAlign)) # originalna linija
-        # u paperu, dropout ide direktn na izlaz ff layera, dakle PRIJE dekodera, ovako (sljedeće 4 linije):
-    PremAlign = Dropout(self.DropProb)(PremAlign) # nova linija
-    HypoAlign = Dropout(self.DropProb)(HypoAlign) # nova linija
-    final_p = Decoder(PremAlign) # nova linija
-    final_h = Decoder(HypoAlign) # nova linija
+    Decoder = Bidirectional(CuDNNLSTM(units=300, return_sequences=True, kernel_initializer='RandomNormal'),
+                            name='finaldecoder')  # [-1,2*units]
+    PremAlign = Dropout(self.DropProb)(PremAlign)
+    HypoAlign = Dropout(self.DropProb)(HypoAlign)
+    final_p = Decoder(PremAlign)
+    final_h = Decoder(HypoAlign)
 
     AveragePooling = Lambda(lambda x: K.mean(x, axis=1)) # outs [-1, dim]
     MaxPooling = Lambda(lambda x: K.max(x, axis=1)) # outs [-1, dim]
@@ -420,36 +322,30 @@ class AttentionAlignmentModel:
     avg_h = AveragePooling(final_h)
     max_p = MaxPooling(final_p)
     max_h = MaxPooling(final_h)
-    # konkatenacija avg i max poolinga za hipotezu i premisu
+    # concat of avg and max pooling for hypothesis and premise
     Final = keras.layers.Concatenate()([avg_p, max_p, avg_h, max_h])
     # dropout layer
     Final = Dropout(self.DropProb)(Final)
-    # ff layer sa tanh aktivacijama
+    # ff layer w/tanh activation
     Final = Dense(300,
                   kernel_regularizer=l2(self.L2Strength),
                   bias_regularizer=l2(self.L2Strength),
                   name='dense300_' + self.dataset,
                   activation='tanh')(Final)
-                  
-    # ovaj layer ne postoji u originalnom kodu
-    # ff layer s linearnim aktivacijama  # nova linija
-    # Final = Activation(activation = 'linear')(Final) # nova linija
-    
-    # dropout layer
-        # originalno, dropout je s pola vjerojatnosti, u paper kodu nema takve modifikacije
+
+    # last dropout factor
     factor = 1
     if self.LastDropoutHalf:
         factor = 2
-    # Final = Dropout(self.DropProb / 2)(Final) # originalna linija
-    Final = Dropout(self.DropProb / factor)(Final) # (nova linija)
+    Final = Dropout(self.DropProb / factor)(Final)
 
-    # softmax klasifikator
+    # softmax classifier
     Final = Dense(2 if self.dataset == 'rte' else 3,
                   activation='softmax',
                   name='judge300_' + self.dataset)(Final)
     self.model = Model(inputs=[premise, hypothesis], outputs=Final)
 
-    
+
   @time_count
   def compile_model(self):
     """ Load Possible Existing Weights and Compile the Model """
@@ -460,10 +356,10 @@ class AttentionAlignmentModel:
                        if self.dataset == 'rte' else ['accuracy'])
     self.model.summary()
     fn = self.rnn_type + '_' + self.dataset + '.check'
-    if os.path.exists(fn) and self.LoadExistingWeights: # nova linija: dodana provjera za self.LoadExistingWeights
+    if os.path.exists(fn) and self.LoadExistingWeights:
         self.model.load_weights(fn, by_name=True)
         print('--------Load Weights Successful!--------')
-         
+
   # returns history of train/val loss/acc values
   def start_train(self):
     """ Starts to Train the entire Model Based on set Parameters """
@@ -471,9 +367,8 @@ class AttentionAlignmentModel:
     callback = [EarlyStopping(patience=self.Patience, verbose=2),
                 ReduceLROnPlateau(patience=5, verbose=1),
                 CSVLogger(filename=self.rnn_type+'log.csv'),
-                # ModelCheckpoint(filepath=self.rnn_type + '_' + self.dataset + '.check',
-                ModelCheckpoint(filepath = self.ResultFilepath + self.Timestamp 
-                                            + '_' + self.dataset 
+                ModelCheckpoint(filepath = self.ResultFilepath + self.Timestamp
+                                            + '_' + self.dataset
                                             + 'weights.{epoch:02d}-{val_loss:.2f}.check',
                                 save_best_only=False,
                                 save_weights_only=True)]
@@ -482,52 +377,44 @@ class AttentionAlignmentModel:
                    y = self.train[2],
                    batch_size = self.BatchSize,
                    epochs = self.MaxEpoch,
-                   # validation_data=([self.test[0], self.test[1]], self.test[2]), # originalno
-                   # promijenjena linija jer se self.test već koristi u evaluate_on_test()
                    validation_data=([self.validation[0], self.validation[1]], self.validation[2]),
                    callbacks = callback)
     self.Options['History'] = self.History.history
     self.format_report()
     return self.History
-    # 3, Evaluate
-    # self.evaluate_on_test() # originalna linija
-    # self.evaluate_on_set(set = 'validation')
-    # self.evaluate_on_set(set = 'test')
 
-  # def evaluate_on_test(self):
-  # eval_set: proslijediti točno ime datoteke nad kojom želimo testirati (bez ekstenzije)
+  # eval_set: forward exact filename upon which to test (without file extension)
   def evaluate_on_set(self, eval_set = 'snli_test', weights_file = None):
-    # provjerava valjanost eval_set argumenta
-    assert eval_set in ['snli_validation', 'snli_test', 
+    # checks validity of eval_set name
+    assert eval_set in ['snli_validation', 'snli_test',
                          'mnli_validation_matched',
                          'mnli_validation_mismatched']
     dataset = None
-    
-    if weights_file is not None: # učitava weighte iz dane datoteke
+
+    if weights_file is not None: # loads weights from given file
         self.model.load_weights(self.ResultFilepath + weights_file)
-    # ili pokušava defaultne weighte
+    # or tries to load default named weights
     elif os.path.exists(self.rnn_type + '_' + self.dataset + '.check'):
         self.model.load_weights(self.rnn_type + '_' + self.dataset + '.check') # revert to the best model
-    else: # inače inicijalizira random
+    else: # or initializes weights to random
         print('No weights found for model!')
         print('Using random initialized weights...')
-    # ako testiramo nad istim datasetom, učitaj ga iz članskih varijabli
+    # if testing on same set, load it from member variables...
     if (self.dataset == 'snli' and 'snli' in eval_set) or (self.dataset == 'mnli' and 'mnli' in eval_set):
         if eval_set == 'snli_validation' or eval_set == 'mnli_validation_matched':
             dataset = self.validation
         elif eval_set == 'snli_test' or eval_set == 'mnli_validation_mismatched':
             dataset = self.test
-    # ako testiramo unakrsno, učitaj odgovarajući dataset iz datoteke
+    # if cross-testing, load dataset from file...
     else:
         print('Loading ' + eval_set + ' data...')
         dataset = json.loads(open(eval_set + '.json', 'r').read())
         dataset[2] = np_utils.to_categorical(dataset[2], 3)
         dataset = self.padd(dataset)
-    # evaluacija
-    loss, acc = self.model.evaluate([dataset[0], dataset[1]], 
+    # evaluation
+    loss, acc = self.model.evaluate([dataset[0], dataset[1]],
                                     dataset[2], batch_size=self.BatchSize)
-    
-    # print("Test: loss = {:.5f}, acc = {:.3f}%".format(loss, acc)) # originalna linija
+
     print('Trained on: ' + self.dataset.upper())
     print('Evaluated on: ' + eval_set.title() + ": loss = {:.5f}, acc = {:.4f}%".format(loss, acc))
     return (loss, acc)
@@ -535,26 +422,25 @@ class AttentionAlignmentModel:
   def evaluate_on_test_sets(self, weights_file = None):
     results = {}
     score = {}
-    # evaluiramo nad svim test setovima
+    # evaluates on all test sets
     for set in ['snli_test', 'mnli_validation_matched','mnli_validation_mismatched']:
       results[set] = {}
       results[set]['loss'], results[set]['acc'] = self.evaluate_on_set(eval_set = set, weights_file = weights_file)
-      # results[set] = score
-    # dumpamo rezultate u datoteku
+    # dumping results to a file
     dump(results, open(self.ResultFilepath + self.Timestamp + '_test_results.json', 'w'), indent = 2)
-    
-  # evaluira model nad SVIM MNLI kategorijama: matched i mismatched
+
+  # evaluates model on ALL MNLI categories: matched & mismatched
   def evaluate_on_all_mnli_categories(self, weights_file = None):
-    if weights_file is not None: # učitava weighte iz dane datoteke
+    if weights_file is not None: # loads weights from given file
         self.model.load_weights(self.ResultFilepath + weights_file)
-    sets = ['mnli_validation_matched', 
+    sets = ['mnli_validation_matched',
             'mnli_validation_mismatched']
     results = {}
     for eval_set in sets:
         print('Loading ' + eval_set + ' data...')
         dataset = json.loads(open(eval_set + '.json', 'r').read())
         all_categories = list(set( dataset[3] ))
-        
+
         for category in all_categories:
             subdataset = [[],[],[]]
             print('Category: ' + category)
@@ -562,52 +448,15 @@ class AttentionAlignmentModel:
                 if dataset[3][i] == category:
                     for j in range(3):
                         subdataset[j].append(dataset[j][i])
-                    # print(subdataset[0][0])
-                    # print(subdataset[1][0])
-                    # print(subdataset[2][0])
-                    # return
             subdataset[2] = np_utils.to_categorical(subdataset[2], 3)
             subdataset = self.padd(subdataset)
             result = {}
-            result['loss'], result['acc'] = self.model.evaluate([subdataset[0], subdataset[1]], 
-                                            subdataset[2], 
+            result['loss'], result['acc'] = self.model.evaluate([subdataset[0], subdataset[1]],
+                                            subdataset[2],
                                             batch_size=self.BatchSize)
             results[category] = result
     dump(results, open(self.ResultFilepath + self.Timestamp + '_categoric_results.json', 'w'), indent = 2)
-        
-        
-  def evaluate_rte_by_snli_model(self, threshold = 0.5):
-    assert self.dataset == 'snli'
-    def padding(x, MaxLen):
-      return pad_sequences(sequences=self.indexer.texts_to_sequences(x), maxlen=MaxLen)
-    def pad_data(x):
-      return padding(x[0], self.SentMaxLen), padding(x[1], self.SentMaxLen), x[2]
-    test_data = pad_data(json.loads(open('RTE_test.json', 'r').read()))
-    true_posi, real_true, pred_true = 0, 0, 0
-    count, left, stime = 0, len(self.test[0]), time.time()
-    for prem, hypo, truth in zip(test_data[0], test_data[1], test_data[2]):
-      prem = np.expand_dims(prem, 0)
-      hypo = np.expand_dims(hypo, 0)
-      ans = np.reshape(self.model.predict(x=[prem, hypo], batch_size=1), -1)  # PREDICTION
-      ans = np.delete(ans, 1, 0) # delete 'neutral' output
-      e_x = np.exp(ans - np.max(ans))
-      ans = e_x / e_x.sum() # reapply softmax
-      pred_label = 1 if ans[1] > threshold else 0
-      if pred_label == 1: pred_true += 1
-      if truth == 1: real_true += 1
-      if pred_label == truth and truth == 1 : true_posi += 1
-      count += 1
-      if time.time() - stime > 1:
-        stime = time.time()
-        left -= count
-        print("{}/s | {}/{} | {:.0f} | p = {:.3f} | r = {:.3f}".format(count, len(self.test[0]) - left,
-                                                                       len(self.test[0]), left / count,
-                                                                       true_posi / pred_true,
-                                                                       true_posi / real_true))
-        count = 0
-    print("true_posi = {}, real_true = {}, pred_true = {}".format(true_posi, real_true, pred_true))
-    p, r = true_posi / pred_true, true_posi / real_true
-    print("prec = {:.4f}, recall = {:.4f}, 2pr/(p+r) = {:.4f}".format(p, r, 2 * p * r / (p + r)))
+
 
   @staticmethod
   def plotHeatMap(df, psize=(8,8), filename='Heatmap'):

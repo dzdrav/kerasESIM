@@ -5,7 +5,7 @@ if  __name__ == '__main__':
     """
     preprocess MNLI
     """
-    dataset = 'mnli_train' # MultiNLI train
+    dataset = 'mnli_train'
     in_filepath = 'multinli_1.0/multinli_1.0_train.jsonl'
     prems_arr, hypos_arr, label_arr = preprocess_SNLI.load_data(in_filepath)
 

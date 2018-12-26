@@ -4,29 +4,24 @@ import json
 labels = {'contradiction': 0, 'neutral': 1, 'entailment': 2}
 
 def load_data(path, additional_label = None):
-    # LABEL_MAP = ispravni labeli
+    # LABEL_MAP = correct labels
     LABEL_MAP = {'contradiction': 0, 'neutral': 1, 'entailment': 2}
     print("Loading", path)
     prems_arr = []
     hypos_arr = []
     label_arr = []
-    category_arr = [] # žanr
+    category_arr = [] # genre
     skipped_examples = []
-    # otvaramo datoteku za čitanje
     with open(path, 'r') as f:
-        # čitamo red po red
         for line in f:
-            # učitavamo 1 red kao 1 primjer
+            # 1 row = 1 example (sentence pair)
             loaded_example = json.loads(line)
-            # gold label je konsenzus label
-            # ako konsenzus nije jedan od ispravna 3 labela, odbaci primjer
+            # gold label = consensus label
+            # if no consensus = reject example
             if loaded_example["gold_label"] not in LABEL_MAP:
               skipped_examples.append(loaded_example)
-              #print((loaded_example['annotator_labels'], loaded_example["gold_label"]))
               continue
-            # u odgovarajuću listu dodajemo p/h/l
-            # sintaksa JSON parsera omogućuje nam asocijativni pristup točno
-            # onome što nas zanima
+            # add prem/hyp/label to corresponing list
             prems_arr.append(loaded_example["sentence1"])
             hypos_arr.append(loaded_example["sentence2"])
             label_arr.append(LABEL_MAP[loaded_example["gold_label"]])
@@ -45,7 +40,7 @@ if  __name__ == '__main__':
     preprocess SNLI
     """
     dataset = 'snli_train' # SNLI train
-    in_filepath = 'snli_1.0/snli_1.0_{}.jsonl'.format(dataset)
+    in_filepath = 'snli_1.0/snli_1.0_train.jsonl'
     prems_arr, hypos_arr, label_arr = load_data(in_filepath)
 
     out_filepath = '{}.json'.format(dataset)
@@ -53,7 +48,7 @@ if  __name__ == '__main__':
 
 
     dataset = 'snli_validation'
-    in_filepath = 'snli_1.0/snli_1.0_{}.jsonl'.format(dataset)
+    in_filepath = 'snli_1.0/snli_1.0_dev.jsonl'
     prems_arr, hypos_arr, label_arr = load_data(in_filepath)
 
     out_filepath = '{}.json'.format(dataset)
@@ -61,7 +56,7 @@ if  __name__ == '__main__':
 
 
     dataset = 'snli_test'
-    in_filepath = 'snli_1.0/snli_1.0_{}.jsonl'.format(dataset)
+    in_filepath = 'snli_1.0/snli_1.0_test.jsonl'
     prems_arr, hypos_arr, label_arr = load_data(in_filepath)
 
     out_filepath = '{}.json'.format(dataset)
