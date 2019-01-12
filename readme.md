@@ -6,7 +6,7 @@ This repo contains **Keras ESIM**, an implementation of Chen et. al. **[Enhanced
 **Natural Language Inference** (also know as Recognizing Textual Entailment) is defined as:
 >...the task of deciding, given two text fragments,
 whether the meaning of one text is entailed (can be inferred) from another text
-(Dagan and Glickman 2004).
+**(Dagan and Glickman 2004).**
 
 ---
 # Requirements
@@ -53,8 +53,7 @@ Beside training and testing on [SNLI](https://nlp.stanford.edu/projects/snli/) d
 - same dataset evaluation
 - cross-dataset evaluation (train on SNLI, test on MNLI and vice versa)
 - evaluation by every MNLI category
-- joint dataset training (MNLI + random subset of 15% of SNLI examples)
- - a subset of SNLI is used so that resulting set has approximately same number of examples from each category (about 75-82K from each MNLI category + 82K from SNLI)
+- joint dataset training (MNLI + random subset of 15% of SNLI examples) (*a subset of SNLI is used so that resulting set has approximately same number of examples from each category: about 75-82K from each MNLI category + 82K from SNLI*)
 
 ## Bayesian optimization
 Code supports Bayesian hyperparameter optimization using [Hyperopt](https://github.com/hyperopt/hyperopt) with Tree Parzen Estimator.
@@ -67,7 +66,7 @@ python hyper.py
 ---
 
 # Credits
-Implementation was adapted from [this repository](https://github.com/dzdrav/SNLI-Keras). Mentioned implementation didn't have preprocessing for SNLI data. Also, model structure and hyperparameters were different from [original ESIM](https://arxiv.org/abs/1609.06038), which resulted in subpar performance (82.8% compared to 88.0% of original ESIM, tested on SNLI).
+Implementation was adapted from [this repository](https://github.com/adamzjk/SNLI-Keras). Mentioned implementation didn't have preprocessing for SNLI data. Also, model structure and hyperparameters were different from [original ESIM](https://arxiv.org/abs/1609.06038), which resulted in subpar performance (82.8% compared to 88.0% of original ESIM, tested on SNLI).
 
 My Keras ESIM is compliant with original structure and hyperparameters. Layers and hyperparameters are adjusted to match those in [original code](https://github.com/lukecq1231/nli), helping this model achieve **85.5%** on SNLI test set.
 
